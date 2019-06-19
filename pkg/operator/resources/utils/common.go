@@ -242,6 +242,10 @@ func CreateContainer(name, repo, image, tag, verbosity string, pullPolicy corev1
 		Image:           fmt.Sprintf("%s/%s:%s", repo, image, tag),
 		ImagePullPolicy: pullPolicy,
 		Args:            []string{"-v=" + verbosity},
+		SecurityContext: &corev1.SecurityContext{
+                                                Privileged: &[]bool{true}[0],
+                                                RunAsUser:  &[]int64{0}[0],
+                                        },
 	}
 }
 
