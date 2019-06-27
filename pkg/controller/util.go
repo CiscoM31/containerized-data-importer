@@ -428,17 +428,14 @@ func MakeImporterPodSpec(image, verbose, pullPolicy string, podEnvVar *importPod
 		ownerUID = pvc.OwnerReferences[0].UID
 	}
 
+	pod.Spec.SecurityContext = &v1.PodSecurityContext{
+		RunAsUser: &[]int64{0}[0],
+	}
+
 	if getVolumeMode(pvc) == v1.PersistentVolumeBlock {
 		pod.Spec.Containers[0].VolumeDevices = addVolumeDevices()
-		pod.Spec.SecurityContext = &v1.PodSecurityContext{
-			RunAsUser: &[]int64{0}[0],
-		}
 	} else {
 		pod.Spec.Containers[0].VolumeMounts = addVolumeMounts()
-		pod.Spec.SecurityContext = &v1.PodSecurityContext{
-			RunAsNonRoot: &[]bool{true}[0],
-			RunAsUser:    &[]int64{1001}[0],
-		}
 	}
 
 	if scratchPvcName != nil {

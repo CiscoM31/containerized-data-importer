@@ -112,4 +112,6 @@ const (
 
 	// ScratchSpaceNeededExitCode is the exit code that indicates the importer pod requires scratch space to function properly.
 	ScratchSpaceNeededExitCode = 42
+
+	ImportFailed = 43
 )

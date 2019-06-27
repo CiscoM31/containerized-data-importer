@@ -149,7 +149,7 @@ func main() {
 			if err != nil {
 				klog.Errorf("%+v", err)
 			}
-			os.Exit(1)
+			os.Exit(common.ImportFailed)
 		}
 	}
 	err = util.WriteTerminationMessage("Import Complete")
