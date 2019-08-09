@@ -26,6 +26,7 @@ import (
 	"k8s.io/klog"
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
+	"os"
 )
 
 var qemuOperations = image.NewQEMUOperations()
@@ -176,6 +177,7 @@ func (dp *DataProcessor) ProcessData() error {
 			if err != nil {
 				err = errors.Wrap(err, "Unable to resize disk image to requested size")
 			}
+			dp. currentPhase = ProcessingPhaseComplete
 		default:
 			return errors.Errorf("Unknown processing phase %s", dp.currentPhase)
 		}
@@ -204,9 +206,17 @@ func (dp *DataProcessor) convert(url *url.URL) (ProcessingPhase, error) {
 		return ProcessingPhaseError, err
 	}
 	klog.V(3).Infoln("Converting to Raw")
-	err = qemuOperations.ConvertToRawStream(url, dp.dataFile)
+	err = qemuOperations.ConvertToRawStream(url, dp.dataFile, dp.scratchDataDir)
 	if err != nil {
 		return ProcessingPhaseError, errors.Wrap(err, "Conversion to Raw failed")
+	}
+
+	// If this is block storage, no resize needed
+	fileInfo, err := os.Stat(dp.dataFile)
+	if err == nil {
+		if (fileInfo.Mode() & os.ModeDevice) != 0 {
+			return ProcessingPhaseComplete, nil
+		}
 	}
 
 	return ProcessingPhaseResize, nil

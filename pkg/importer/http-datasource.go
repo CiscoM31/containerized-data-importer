@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"net/url"
 	"path"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -117,7 +116,7 @@ func (hs *HTTPDataSource) Info() (ProcessingPhase, error) {
 	if !hs.readers.Archived && !hs.customCA {
 		// We can pass straight to conversion from the endpoint. No scratch required.
 		hs.url = hs.endpoint
-		return ProcessingPhaseConvert, nil
+		return ProcessingPhaseTransferScratch, nil
 	}
 	if !hs.readers.Convert {
 		return ProcessingPhaseTransferDataFile, nil
@@ -132,14 +131,8 @@ func (hs *HTTPDataSource) Transfer(path string) (ProcessingPhase, error) {
 			//Path provided is invalid.
 			return ProcessingPhaseError, ErrInvalidPath
 		}
-		file := filepath.Join(path, tempFile)
-		err := util.StreamDataToFile(hs.readers.TopReader(), file)
-		if err != nil {
-			return ProcessingPhaseError, err
-		}
-		// If we successfully wrote to the file, then the parse will succeed.
-		hs.url, _ = url.Parse(file)
-		return ProcessingPhaseProcess, nil
+		// we'll download while converting using qemu
+		return ProcessingPhaseConvert, nil
 	} else if hs.contentType == cdiv1.DataVolumeArchive {
 		if err := util.UnArchiveTar(hs.readers.TopReader(), path); err != nil {
 			return ProcessingPhaseError, errors.Wrap(err, "unable to untar files from endpoint")
