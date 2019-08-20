@@ -129,18 +129,31 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 	}
 
 	if blockDevice {
-		scratchFile := filepath.Join(scratchDir, "disk.img")
-		jsonArg := fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", fUrl.Scheme, fUrl, networkTimeoutSecs)
-		_, err := qemuExecFunction(nil, reportProgress, "qemu-img", "convert", "-p", "-O", "raw", jsonArg, scratchFile)
+		info, err := o.Info(fUrl)
 		if err != nil {
-			// TODO: Determine what to do here, the conversion failed, and we need to clean up the mess, but we could be writing to a block device
-			os.Remove(dest)
-			return errors.Wrap(err, "could not convert to raw image to disk")
+			return errors.Wrap(err, "could not get image info from url")
 		}
-		dataFileURL, _ := url.Parse(scratchFile)
-		info, err := o.Info(dataFileURL)
 		vSize := info.VirtualSize
 		uSize := info.ActualSize
+		scratchFile := filepath.Join(scratchDir, "disk.img")
+		if info.Format == "qcow2" {
+			jsonArg := fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", fUrl.Scheme, fUrl, networkTimeoutSecs)
+			_, err := qemuExecFunction(nil, reportProgress, "qemu-img", "convert", "-p", "-O", "raw", jsonArg, scratchFile)
+			if err != nil {
+				// TODO: Determine what to do here, the conversion failed, and we need to clean up the mess, but we could be writing to a block device
+				os.Remove(dest)
+				return errors.Wrap(err, "could not convert to raw image to disk")
+			}
+		} else if info.Format == "raw" {
+			_, err := qemuExecFunction(nil, nil, "curl",  "-o", scratchFile, fUrl.String())
+			if err != nil {
+				os.Remove("disk.img")
+				return errors.Wrap(err, "could not download image")
+			}
+		} else {
+			msg := fmt.Sprintf("unsupported image format %v for image: %v", info.Format, fUrl)
+			return errors.Wrap(err, msg)
+		}
 		o.checkForResize(scratchFile, scratchDir, vSize, uSize)
 		input := fmt.Sprintf("if=%s", scratchFile)
 		output := fmt.Sprintf("of=%s", dest)
