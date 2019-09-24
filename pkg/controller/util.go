@@ -31,6 +31,7 @@ import (
 	"kubevirt.io/containerized-data-importer/pkg/operator"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 	"kubevirt.io/containerized-data-importer/pkg/util/cert/triple"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 const (
@@ -264,6 +265,18 @@ func newScratchPersistentVolumeClaimSpec(pvc *v1.PersistentVolumeClaim, pod *v1.
 		LabelImportPvc:   pvc.Name,
 	}
 
+	cap := pvc.Spec.Resources.Requests[v1.ResourceStorage]
+	capacity,_ := (&cap).AsInt64()
+
+	// need double capacity to convert qcow2 to raw after download
+	doubleCap := 2 * capacity
+
+	Resources := v1.ResourceRequirements{
+		Requests: v1.ResourceList{
+			v1.ResourceName(v1.ResourceStorage): resource.MustParse(strconv.Itoa(int(doubleCap))),
+		},
+	}
+
 	pvcDef := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvc.Name + "-scratch",
@@ -280,7 +293,7 @@ func newScratchPersistentVolumeClaimSpec(pvc *v1.PersistentVolumeClaim, pod *v1.
 		},
 		Spec: v1.PersistentVolumeClaimSpec{
 			AccessModes: []v1.PersistentVolumeAccessMode{"ReadWriteOnce"},
-			Resources:   pvc.Spec.Resources,
+			Resources:   Resources,
 		},
 	}
 	if storageClassName != "" {
