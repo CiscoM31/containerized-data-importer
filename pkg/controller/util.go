@@ -623,17 +623,10 @@ func ValidateCanCloneSourceAndTargetSpec(sourceSpec, targetSpec *v1.PersistentVo
 	if sourceRequest.Value() > targetRequest.Value() {
 		return errors.New("Target resources requests storage size is smaller than the source")
 	}
-	// Verify that the source and target volume modes are the same.
-	sourceVolumeMode := v1.PersistentVolumeFilesystem
+
+	// Verify that the source is not in block volume mode.
 	if sourceSpec.VolumeMode != nil && *sourceSpec.VolumeMode == v1.PersistentVolumeBlock {
-		sourceVolumeMode = v1.PersistentVolumeBlock
-	}
-	targetVolumeMode := v1.PersistentVolumeFilesystem
-	if targetSpec.VolumeMode != nil && *targetSpec.VolumeMode == v1.PersistentVolumeBlock {
-		targetVolumeMode = v1.PersistentVolumeBlock
-	}
-	if sourceVolumeMode != targetVolumeMode {
-		return errors.New("Source and target volume modes do not match")
+		return errors.New("Cannot clone from volume that is in block mode")
 	}
 	// Can clone.
 	return nil
@@ -748,20 +741,20 @@ func MakeCloneSourcePodSpec(image, pullPolicy, sourcePvcName string, pvc *v1.Per
 		},
 	}
 
-	var volumeMode v1.PersistentVolumeMode
+	/*var volumeMode v1.PersistentVolumeMode
 	if pvc.Spec.VolumeMode != nil {
 		volumeMode = *pvc.Spec.VolumeMode
 	} else {
 		volumeMode = v1.PersistentVolumeFilesystem
-	}
-	if volumeMode == v1.PersistentVolumeBlock {
+	}*/
+	/*if volumeMode == v1.PersistentVolumeBlock {
 		pod.Spec.Containers[0].VolumeDevices = addVolumeDevices()
 		pod.Spec.Containers[0].VolumeMounts = addCloneVolumeMounts("Block", id)
 		pod.Spec.Containers[0].Args = addArgs("source", id, "block")
-	} else {
+	} else {*/
 		pod.Spec.Containers[0].VolumeMounts = addCloneVolumeMounts("FS", id)
 		pod.Spec.Containers[0].Args = addArgs("source", id, "FS")
-	}
+	//}
 	return pod
 }
 
@@ -774,10 +767,10 @@ func addArgs(source, id, volumeMode string) []string {
 
 func addCloneVolumeMounts(volumeMode, id string) []v1.VolumeMount {
 	if volumeMode == "Block" {
-		volumeMounts := []v1.VolumeMount{
+		volumeMounts := []v1.VolumeMount {
 			{
-				Name:      socketPathName,
-				MountPath: common.ClonerSocketPath + "/" + id,
+				Name:      DataVolName+"-src",
+				MountPath: common.ClonerImagePath+"-src",
 			},
 		}
 		return volumeMounts
@@ -788,8 +781,8 @@ func addCloneVolumeMounts(volumeMode, id string) []v1.VolumeMount {
 			MountPath: common.ClonerImagePath,
 		},
 		{
-			Name:      socketPathName,
-			MountPath: common.ClonerSocketPath + "/" + id,
+			Name:      DataVolName+"-src",
+			MountPath: common.ClonerImagePath+"-src",
 		},
 	}
 	return volumeMounts
@@ -797,9 +790,10 @@ func addCloneVolumeMounts(volumeMode, id string) []v1.VolumeMount {
 
 // CreateCloneTargetPod creates our cloning tgt pod which will be used for out of band cloning to write the contents of the tgt PVC
 func CreateCloneTargetPod(client kubernetes.Interface, image string, pullPolicy string,
-	pvc *v1.PersistentVolumeClaim, podAffinityNamespace string) (*v1.Pod, error) {
+	pvc *v1.PersistentVolumeClaim, podAffinityNamespace, cr string) (*v1.Pod, error) {
+	_, srcPVC := ParseSourcePvcAnnotation(cr, "/")
 	ns := pvc.Namespace
-	pod := MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace, pvc)
+	pod := MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace, pvc, srcPVC)
 
 	pod, err := client.CoreV1().Pods(ns).Create(pod)
 	if err != nil {
@@ -810,7 +804,7 @@ func CreateCloneTargetPod(client kubernetes.Interface, image string, pullPolicy 
 }
 
 // MakeCloneTargetPodSpec creates and returns the clone target pod spec based on the target pvc.
-func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc *v1.PersistentVolumeClaim) *v1.Pod {
+func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc *v1.PersistentVolumeClaim, srcPVC string) *v1.Pod {
 	// target pod name contains the pvc name
 	podName := fmt.Sprintf("%s-", common.ClonerTargetPodName)
 	id := string(pvc.GetUID())
@@ -851,25 +845,6 @@ func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc 
 			},
 		},
 		Spec: v1.PodSpec{
-			Affinity: &v1.Affinity{
-				PodAffinity: &v1.PodAffinity{
-					RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
-						{
-							LabelSelector: &metav1.LabelSelector{
-								MatchExpressions: []metav1.LabelSelectorRequirement{
-									{
-										Key:      common.CloningLabelKey,
-										Operator: metav1.LabelSelectorOpIn,
-										Values:   []string{common.CloningLabelValue + "-" + id},
-									},
-								},
-							},
-							Namespaces:  []string{podAffinityNamespace}, //the scheduler looks for the namespace of the source pod
-							TopologyKey: common.CloningTopologyKey,
-						},
-					},
-				},
-			},
 			// We create initContainer just to set the pod as privileged.
 			// The pod has to be privileged as it has to have access to the hostPath in the node.
 			// However, currently there is a bug that we cannot attach block device to the pod if the pod (container)
@@ -883,12 +858,6 @@ func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc 
 				{
 					Name:  "init",
 					Image: image,
-					VolumeMounts: []v1.VolumeMount{
-						{
-							Name:      socketPathName,
-							MountPath: common.ClonerSocketPath + "/" + id,
-						},
-					},
 					SecurityContext: &v1.SecurityContext{
 						Privileged: &[]bool{true}[0],
 						RunAsUser:  &[]int64{0}[0],
@@ -929,10 +898,11 @@ func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc 
 					},
 				},
 				{
-					Name: socketPathName,
+					Name: DataVolName+"-src",
 					VolumeSource: v1.VolumeSource{
-						HostPath: &v1.HostPathVolumeSource{
-							Path: common.ClonerSocketPath + "/" + id,
+						PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{
+							ClaimName: srcPVC,
+							ReadOnly:  false,
 						},
 					},
 				},
@@ -953,6 +923,7 @@ func MakeCloneTargetPodSpec(image, pullPolicy, podAffinityNamespace string, pvc 
 		pod.Spec.Containers[0].VolumeMounts = addCloneVolumeMounts("FS", id)
 		pod.Spec.Containers[0].Args = addArgs("target", id, "FS")
 	}
+
 	return pod
 }
 

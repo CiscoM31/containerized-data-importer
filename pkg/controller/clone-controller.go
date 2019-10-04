@@ -62,46 +62,31 @@ func NewCloneController(client kubernetes.Interface,
 	return c
 }
 
-func (cc *CloneController) findClonePodsFromCache(pvc *v1.PersistentVolumeClaim) (*v1.Pod, *v1.Pod, error) {
-	var sourcePod, targetPod *v1.Pod
+func (cc *CloneController) findClonePodsFromCache(pvc *v1.PersistentVolumeClaim) (*v1.Pod, error) {
+	var targetPod *v1.Pod
 	annCloneRequest := pvc.GetAnnotations()[AnnCloneRequest]
 	if annCloneRequest != "" {
-		sourcePvcNamespace, _ := ParseSourcePvcAnnotation(annCloneRequest, "/")
-		if sourcePvcNamespace == "" {
-			return nil, nil, errors.Errorf("Bad CloneRequest Annotation")
+		pvcNamespace, _ := ParseSourcePvcAnnotation(annCloneRequest, "/")
+		if pvcNamespace == "" {
+			return nil, errors.Errorf("Bad CloneRequest Annotation")
 		}
-		//find the source pod
-		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{CloneUniqueID: string(pvc.GetUID()) + "-source-pod"}})
+		//find the target pod
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{CloneUniqueID: string(pvc.GetUID()) + "-target-pod"}})
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		podList, err := cc.podLister.Pods(sourcePvcNamespace).List(selector)
+		podList, err := cc.podLister.Pods(pvcNamespace).List(selector)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if len(podList) == 0 {
-			return nil, nil, nil
+			return nil, nil
 		} else if len(podList) > 1 {
-			return nil, nil, errors.Errorf("multiple source pods found for clone PVC %s/%s", pvc.Namespace, pvc.Name)
-		}
-		sourcePod = podList[0]
-		//find target pod
-		selector, err = metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{CloneUniqueID: string(pvc.GetUID()) + "-target-pod"}})
-		if err != nil {
-			return nil, nil, err
-		}
-		podList, err = cc.podLister.Pods(pvc.Namespace).List(selector)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(podList) == 0 {
-			return nil, nil, nil
-		} else if len(podList) > 1 {
-			return nil, nil, errors.Errorf("multiple target pods found for clone PVC %s/%s", pvc.Namespace, pvc.Name)
+			return nil, errors.Errorf("multiple target pods found for clone PVC %s/%s", pvc.Namespace, pvc.Name)
 		}
 		targetPod = podList[0]
 	}
-	return sourcePod, targetPod, nil
+	return targetPod, nil
 }
 
 // Create the cloning source and target pods based the pvc. The pvc is checked (again) to ensure that we are not already
@@ -110,7 +95,7 @@ func (cc *CloneController) processPvcItem(pvc *v1.PersistentVolumeClaim) error {
 	anno := map[string]string{}
 
 	// find cloning source and target Pods
-	sourcePod, targetPod, err := cc.findClonePodsFromCache(pvc)
+	targetPod, err := cc.findClonePodsFromCache(pvc)
 	if err != nil {
 		return err
 	}
@@ -121,10 +106,7 @@ func (cc *CloneController) processPvcItem(pvc *v1.PersistentVolumeClaim) error {
 	}
 
 	// Pods must be controlled by this PVC
-	if sourcePod != nil && !metav1.IsControlledBy(sourcePod, pvc) {
-		return errors.Errorf("found pod %s/%s not owned by pvc %s/%s", sourcePod.Namespace, sourcePod.Name, pvc.Namespace, pvc.Name)
-	}
-	if targetPod != nil && !metav1.IsControlledBy(sourcePod, pvc) {
+	if targetPod != nil && !metav1.IsControlledBy(targetPod, pvc) {
 		return errors.Errorf("found pod %s/%s not owned by pvc %s/%s", targetPod.Namespace, targetPod.Name, pvc.Namespace, pvc.Name)
 	}
 
@@ -138,31 +120,20 @@ func (cc *CloneController) processPvcItem(pvc *v1.PersistentVolumeClaim) error {
 	if exists && (phase == string(v1.PodSucceeded)) {
 		needsSync = false
 	}
-
-	if needsSync && (sourcePod == nil || targetPod == nil) {
+	if needsSync && targetPod == nil {
 		err := cc.initializeExpectations(pvcKey)
 		if err != nil {
 			return err
 		}
 
-		if sourcePod == nil {
+		if targetPod == nil {
 			crann, err := getCloneRequestPVCAnnotation(pvc)
 			if err != nil {
 				return err
 			}
-			// all checks passed, let's create the cloner pods!
-			cc.raisePodCreate(pvcKey)
-			//create the source pod
-			sourcePod, err = CreateCloneSourcePod(cc.clientset, cc.image, cc.pullPolicy, crann, pvc)
-			if err != nil {
-				cc.observePodCreate(pvcKey)
-				return err
-			}
-		}
-		if targetPod == nil {
 			cc.raisePodCreate(pvcKey)
 			//create the target pod
-			targetPod, err = CreateCloneTargetPod(cc.clientset, cc.image, cc.pullPolicy, pvc, sourcePod.ObjectMeta.Namespace)
+			targetPod, err = CreateCloneTargetPod(cc.clientset, cc.image, cc.pullPolicy, pvc, pvc.Namespace, crann)
 			if err != nil {
 				cc.observePodCreate(pvcKey)
 				return err
@@ -186,25 +157,18 @@ func (cc *CloneController) processPvcItem(pvc *v1.PersistentVolumeClaim) error {
 	if err != nil {
 		return errors.WithMessage(err, "could not update pvc %q annotation and/or label")
 	} else if pvc.Annotations[AnnCloneOf] == "true" {
-		cc.deleteClonePods(sourcePod.Namespace, sourcePod.Name, targetPod.Namespace, targetPod.Name)
+		cc.deleteClonePods(targetPod.Namespace, targetPod.Name)
 	}
 	return nil
 }
 
-func (cc *CloneController) deleteClonePods(srcNamespace, srcName, tgtNamespace, tgtName string) {
-	srcReq := podDeleteRequest{
-		namespace: srcNamespace,
-		podName:   srcName,
-		podLister: cc.Controller.podLister,
-		k8sClient: cc.Controller.clientset,
-	}
+func (cc *CloneController) deleteClonePods(tgtNamespace, tgtName string) {
 	tgtReq := podDeleteRequest{
 		namespace: tgtNamespace,
 		podName:   tgtName,
 		podLister: cc.Controller.podLister,
 		k8sClient: cc.Controller.clientset,
 	}
-	deletePod(srcReq)
 	deletePod(tgtReq)
 }
 
