@@ -374,6 +374,10 @@ func (c *UploadController) syncHandler(key string) error {
 	_, isUploadPod := pvc.ObjectMeta.Annotations[AnnUploadRequest]
 	resourceName := GetUploadResourceName(pvc.Name)
 
+	if !isUploadPod {
+		return nil
+	}
+
 	// force cleanup if PVC pending delete and pod running or the upload annotation was removed
 	if !isUploadPod || (pvc.DeletionTimestamp != nil && !podSucceededFromPVC(pvc)) {
 		// delete everything

@@ -300,6 +300,10 @@ func (ic *ImportController) syncPvc(key string) error {
 
 	if pvc.DeletionTimestamp != nil {
 		klog.V(3).Infof("detected PVC delete request for PVC '%s', cleaning up any associated PODS", pvc.Name)
+
+		msg := fmt.Sprintf("Deleted DataVolume %s", pvc.Name)
+		ic.recorder.Event(pvc, v1.EventTypeNormal, "Deletion", msg)
+
 		pod, err := ic.findImportPodFromCache(pvc)
 		if err != nil {
 			return err
