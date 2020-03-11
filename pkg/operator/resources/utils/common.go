@@ -211,11 +211,6 @@ func CreateDeployment(name, matchKey, matchValue, serviceAccount string, numRepl
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: WithCommonLabels(matchMap),
 				},
-				Spec: corev1.PodSpec{
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &[]bool{true}[0],
-					},
-				},
 			},
 		},
 	}
