@@ -24,11 +24,8 @@ require (
 	github.com/minio/minio-go v6.0.14+incompatible
 	github.com/onsi/ginkgo v1.8.0
 	github.com/onsi/gomega v1.5.1-0.20190515112211-6a48b4839f85
-	github.com/openshift/api v0.0.0
-	github.com/openshift/client-go v0.0.0
 	github.com/openshift/custom-resource-status v0.0.0-20190822192428-e62f2f3b79f3
 	github.com/openshift/library-go v0.0.0-20200114162033-e8b3a065ded2
-	github.com/operator-framework/operator-lifecycle-manager v0.0.0-20190725173916-b56e63a643cc
 	github.com/operator-framework/operator-marketplace v0.0.0-20190617165322-1cbd32624349
 	github.com/ovirt/go-ovirt v4.3.4+incompatible
 	github.com/pkg/errors v0.8.1
@@ -50,37 +47,27 @@ require (
 	gopkg.in/square/go-jose.v2 v2.3.1
 	gopkg.in/yaml.v2 v2.2.4
 	k8s.io/api v0.16.4
-	k8s.io/apiextensions-apiserver v0.0.0
 	k8s.io/apimachinery v0.16.4
 	k8s.io/apiserver v0.16.4
 	k8s.io/client-go v8.0.0+incompatible
-	k8s.io/cluster-bootstrap v0.0.0
 	k8s.io/klog v0.4.0
-	k8s.io/kube-aggregator v0.0.0
 	k8s.io/kube-openapi v0.0.0-20191107075043-30be4d16710a
 	kubevirt.io/qe-tools v0.1.3
 	sigs.k8s.io/controller-runtime v0.4.0
 )
 
 replace (
-	github.com/openshift/api => github.com/openshift/api v0.0.0-20191219222812-2987a591a72c
-	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20191125132246-f6563a70e19a
-	github.com/openshift/library-go => github.com/mhenriks/library-go v0.0.0-20200116194830-9fcc1a687a9d
-
 	k8s.io/api => k8s.io/api v0.16.4
-	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.16.4
 	k8s.io/apimachinery => k8s.io/apimachinery v0.16.4
 	k8s.io/apiserver => k8s.io/apiserver v0.16.4
 	k8s.io/cli-runtime => k8s.io/cli-runtime v0.16.4
 	k8s.io/client-go => k8s.io/client-go v0.16.4
 	k8s.io/cloud-provider => k8s.io/cloud-provider v0.16.4
-	k8s.io/cluster-bootstrap => k8s.io/cluster-bootstrap v0.16.4
 	k8s.io/code-generator => k8s.io/code-generator v0.16.4
 	k8s.io/component-base => k8s.io/component-base v0.16.4
 	k8s.io/cri-api => k8s.io/cri-api v0.16.4
 	k8s.io/csi-translation-lib => k8s.io/csi-translation-lib v0.16.4
 	k8s.io/klog => k8s.io/klog v0.4.0
-	k8s.io/kube-aggregator => k8s.io/kube-aggregator v0.16.4
 	k8s.io/kube-controller-manager => k8s.io/kube-controller-manager v0.16.4
 	k8s.io/kube-openapi => k8s.io/kube-openapi v0.0.0-20191107075043-30be4d16710a
 	k8s.io/kube-proxy => k8s.io/kube-proxy v0.16.4
