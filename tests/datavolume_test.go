@@ -72,20 +72,14 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 			var dataVolume *cdiv1.DataVolume
 			switch name {
 			case "imageio":
-				cmName := "imageiocm"
+				cm, err := utils.CopyImageIOCertConfigMap(f.K8sClient, f.Namespace.Name, f.CdiInstallNs)
+				Expect(err).To(BeNil())
 				stringData := map[string]string{
 					common.KeyAccess: "YWRtaW5AaW50ZXJuYWw=",
 					common.KeySecret: "MTIzNDU2",
 				}
 				s, _ := utils.CreateSecretFromDefinition(f.K8sClient, utils.NewSecretDefinition(nil, stringData, nil, f.Namespace.Name, "mysecret"))
-				cm := &v1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: cmName,
-					},
-					Data: map[string]string{},
-				}
-				f.K8sClient.CoreV1().ConfigMaps(f.Namespace.Name).Create(cm)
-				dataVolume = utils.NewDataVolumeWithImageioImport(dataVolumeName, "1Gi", imageioURL, s.Name, cmName, "123")
+				dataVolume = utils.NewDataVolumeWithImageioImport(dataVolumeName, "1Gi", imageioURL, s.Name, cm, "123")
 			case "import-http":
 				dataVolume = utils.NewDataVolumeWithHTTPImport(dataVolumeName, "1Gi", url)
 			case "import-https":
@@ -105,7 +99,10 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 				By(fmt.Sprintf("creating a new target PVC (datavolume) to clone %s", sourcePvc.Name))
 				dataVolume = utils.NewCloningDataVolume(dataVolumeName, "1Gi", sourcePvc)
 			case "import-registry":
-				repeat = 10
+				if utils.IsHostpathProvisioner() {
+					// Repeat rapidly to make sure we don't get regular and scratch space on different nodes.
+					repeat = 10
+				}
 				dataVolume = utils.NewDataVolumeWithRegistryImport(dataVolumeName, "1Gi", url)
 				cm, err := utils.CopyRegistryCertConfigMap(f.K8sClient, f.Namespace.Name, f.CdiInstallNs)
 				Expect(err).To(BeNil())
