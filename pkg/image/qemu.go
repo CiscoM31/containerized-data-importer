@@ -117,7 +117,7 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 		return convertToRaw(fUrl.String(), dest)
 	}
 
-	klog.V(1).Info("Qemu convertToRawStream: %s", fUrl.String())
+	klog.V(1).Infof("Qemu convertToRawStream: %s", fUrl.String())
 
 	blockDevice := false
 	fileInfo, err := os.Stat(dest)
@@ -127,18 +127,36 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 		}
 	}
 
-	info, err := o.Info(fUrl)
-	if err != nil {
-		return errors.Wrap(err, "could not get image info from url")
+	scratchFile := filepath.Join(scratchDir, "disk.img")
+
+	_, err = os.Stat("/certs/ca.pem")
+	if (os.IsNotExist(err)) {
+		_, err = qemuExecFunction(nil, reportCurlProgress, "curl", "-k", "-o", scratchFile, fUrl.String())
+		if err != nil {
+			os.Remove(scratchFile)
+			return errors.Wrap(err, "could not download image")
+		}
+	} else {
+		_, err = qemuExecFunction(nil, reportCurlProgress, "curl", "--cacert", "/certs/ca.pem", "-o", scratchFile, fUrl.String())
+		if err != nil {
+			os.Remove(scratchFile)
+			return errors.Wrap(err, "could not download image")
+		}
 	}
+
+	output, err := qemuExecFunction(qemuInfoLimits, nil, "qemu-img", "info", "--output=json", scratchFile)
+	if err != nil {
+		return errors.Wrapf(err, "Error getting info on image %s", scratchFile)
+	}
+	var info ImgInfo
+	err = json.Unmarshal(output, &info)
+	if err != nil {
+		klog.Errorf("Invalid JSON:\n%s\n", string(output))
+		return errors.Wrapf(err, "Invalid json for image %s, error: %v", scratchFile, err)
+	}
+
 	vSize := info.VirtualSize
 	uSize := info.ActualSize
-	scratchFile := filepath.Join(scratchDir, "disk.img")
-	_, err = qemuExecFunction(nil, reportCurlProgress, "curl",  "-o", scratchFile, fUrl.String())
-	if err != nil {
-		os.Remove(scratchFile)
-		return errors.Wrap(err, "could not download image")
-	}
 
 	if blockDevice {
 		if info.Format == "qcow2" {
@@ -276,7 +294,13 @@ func isSupportedFormat(value string) bool {
 func (o *qemuOperations) Validate(url *url.URL, availableSize int64) error {
 	info, err := o.Info(url)
 	if err != nil {
-		return err
+		// qemu-img file driver that checks image info does not have a way
+		// to take self signed certs as argument for verification.
+		// As a result, for https selfsigned cases, the call will fail.
+		// if we fail to get the image info, we will defer it now and
+		// validate post download for such cases
+		klog.Errorf("Failed to get image info: %v", err)
+		return nil
 	}
 
 	if !isSupportedFormat(info.Format) {
