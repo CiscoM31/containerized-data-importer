@@ -340,6 +340,15 @@ func (c *DataVolumeController) syncHandler(key string) error {
 		// The DataVolume resource may no longer exist, in which case we stop
 		// processing.
 		if k8serrors.IsNotFound(err) {
+			pvc, err := c.pvcLister.PersistentVolumeClaims(namespace).Get(name)
+			if err == nil {
+				klog.V(3).Infof("found pvc for deleted datavolume %s/%s", namespace, name)
+				msg := fmt.Sprintf("Deleted DataVolume %s", pvc.Name)
+				c.recorder.Event(pvc, corev1.EventTypeNormal, "Deletion", msg)
+			} else {
+				klog.V(3).Infof("failed to find pvc for deleted datavolume %s/%s", namespace, name)
+			}
+
 			runtime.HandleError(errors.Errorf("dataVolume '%s' in work queue no longer exists", key))
 			c.pvcExpectations.DeleteExpectations(key)
 			return nil

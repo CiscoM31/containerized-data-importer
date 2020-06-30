@@ -107,13 +107,24 @@ func GetAvailableSpaceBlock(deviceName string) int64 {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil {
+		klog.Warningf("error executing lsblk on %v, err:%v", deviceName, err)
 		return int64(-1)
 	}
-	i, err := strconv.ParseInt(strings.TrimSpace(string(out.Bytes())), 10, 64)
-	if err != nil {
-		return int64(-1)
+	s := strings.TrimSpace(string(out.Bytes()))
+
+	// if this block device was ever partitioned before, it will return sizes of all partitions
+	// we will need only aggregate size which is the first no.
+	s1 := strings.Split(s, "\n")
+	if len(s1) > 0 {
+		i, err := strconv.ParseInt(s1[0], 10, 64)
+		if err != nil {
+			klog.Warningf("error parsing lsblk on %v, err:%v, output:%s", deviceName, err, strings.TrimSpace(string(out.Bytes())))
+			return int64(-1)
+		}
+		return i
 	}
-	return i
+	klog.Warning("error parsing lsblk on %v, err:%v, output:%s", deviceName, err, strings.TrimSpace(string(out.Bytes())))
+	return int64(-1)
 }
 
 // MinQuantity calculates the minimum of two quantities.
