@@ -355,6 +355,16 @@ func CreateImporterPod(client kubernetes.Interface, image, verbose, pullPolicy s
 	return pod, nil
 }
 
+func getWeightedAffinityTerm(key, val string) v1.WeightedPodAffinityTerm {
+
+	labelSelReq := metav1.LabelSelectorRequirement{Key: key, Operator: metav1.LabelSelectorOpIn,
+		Values: []string{val}}
+	labelSel := metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{labelSelReq}}
+	podTerm := v1.PodAffinityTerm{LabelSelector: &labelSel, TopologyKey: "kubernetes.io/hostname"}
+	wPodTerm := v1.WeightedPodAffinityTerm{Weight: 1, PodAffinityTerm: podTerm}
+	return wPodTerm
+}
+
 // MakeImporterPodSpec creates and return the importer pod spec based on the passed-in endpoint, secret and pvc.
 func MakeImporterPodSpec(image, verbose, pullPolicy string, podEnvVar *importPodEnvVar, pvc *v1.PersistentVolumeClaim, scratchPvcName *string) *v1.Pod {
 	// importer pod name contains the pvc name
@@ -435,6 +445,13 @@ func MakeImporterPodSpec(image, verbose, pullPolicy string, podEnvVar *importPod
 			Volumes:       volumes,
 		},
 	}
+
+	// add prefferred anti-affinity to other importers
+	podTerm := getWeightedAffinityTerm(common.CDIComponentLabel, common.ImporterPodName)
+	podAntiAff := &v1.PodAntiAffinity{}
+	podAntiAff.PreferredDuringSchedulingIgnoredDuringExecution =
+		append(podAntiAff.PreferredDuringSchedulingIgnoredDuringExecution, podTerm)
+	pod.Spec.Affinity = &v1.Affinity{PodAntiAffinity: podAntiAff}
 
 	ownerUID := pvc.UID
 	if len(pvc.OwnerReferences) == 1 {
