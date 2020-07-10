@@ -57,7 +57,7 @@ type ImgInfo struct {
 
 // QEMUOperations defines the interface for executing qemu subprocesses
 type QEMUOperations interface {
-	ConvertToRawStream(*url.URL, string, string) error
+	ConvertToRawStream(*url.URL, string, string, string) error
 	Resize(string, resource.Quantity) error
 	Info(url *url.URL) (*ImgInfo, error)
 	Validate(*url.URL, int64) error
@@ -111,7 +111,7 @@ func convertToRaw(src, dest string) error {
 	return nil
 }
 
-func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir string) error {
+func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir, reqImgSize string) error {
 	if len(fUrl.Scheme) == 0 {
 		// File, instead of URL
 		return convertToRaw(fUrl.String(), dest)
@@ -156,11 +156,16 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 	}
 
 	vSize := info.VirtualSize
-	uSize := info.ActualSize
+
+	uSize := int64(0)
+	if reqImgSize != "" {
+		reqSize := resource.MustParse(reqImgSize)
+		uSize, _ = reqSize.AsInt64()
+	}
 
 	if blockDevice {
 		if info.Format == "qcow2" {
-			o.checkForResize(scratchFile, scratchDir, vSize, uSize)
+			o.checkForResize(scratchFile, common.ImporterWriteBlockPath, vSize, uSize)
 			//jsonArg := fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", fUrl.Scheme, fUrl, networkTimeoutSecs)
 			scratchFile1 := filepath.Join(scratchDir, "disk1.img")
 			_, err := qemuExecFunction(nil, reportProgress, "qemu-img", "convert", "-p", "-O", "raw", scratchFile, scratchFile1)
@@ -179,7 +184,7 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 				return errors.Wrap(err, "could not write raw image to disk")
 			}
 		} else if info.Format == "raw" {
-			o.checkForResize(scratchFile, scratchDir, vSize, uSize)
+			o.checkForResize(scratchFile, common.ImporterWriteBlockPath, vSize, uSize)
 			input := fmt.Sprintf("if=%s", scratchFile)
 			output := fmt.Sprintf("of=%s", dest)
 			_, err = qemuExecFunction(nil, nil, "dd", input, output, "bs=1M")
@@ -220,8 +225,22 @@ func (o *qemuOperations) ConvertToRawStream(fUrl *url.URL, dest, scratchDir stri
 }
 
 func (o *qemuOperations) checkForResize(dFile, dest string, vSize, uSize int64) {
+	availableDestSpace := util.GetAvailableSpace(dest)
+	if _, err := os.Stat(common.ImporterWriteBlockPath); !os.IsNotExist(err) {
+		// calculate size based on block device size
+		availableDestSpace = util.GetAvailableSpaceBlock(dest)
+		klog.Infof("Block volume size of %v : %v, userReqsize:%v", dest, availableDestSpace, uSize)
+		if availableDestSpace > 1000*1024*1024*1024 {
+			if uSize != 0 {
+				availableDestSpace = uSize
+			} else {
+				availableDestSpace = 100*1024*1024*1024
+			}
+			klog.Warningf("Block volume very large, HX 2TB Volume BUG? Limiting to uSize: %v", availableDestSpace)
+		}
+	}
 
-	targetSize := util.GetAvailableSpace(dest) + uSize
+	targetSize := availableDestSpace
 	currentImageSizeQuantity := resource.NewScaledQuantity(vSize, 0)
 	newImageSizeQuantity := resource.NewScaledQuantity(targetSize, 0)
 	targetQuantity := resource.NewScaledQuantity(targetSize, 0)
@@ -319,7 +338,7 @@ func (o *qemuOperations) Validate(url *url.URL, availableSize int64) error {
 
 // ConvertToRawStream converts an http accessible image to raw format without locally caching the image
 func ConvertToRawStream(url *url.URL, dest, scratchDir string) error {
-	return qemuIterface.ConvertToRawStream(url, dest, scratchDir)
+	return qemuIterface.ConvertToRawStream(url, dest, scratchDir, "")
 }
 
 // Validate does basic validation of a qemu image

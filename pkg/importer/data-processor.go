@@ -206,7 +206,7 @@ func (dp *DataProcessor) convert(url *url.URL) (ProcessingPhase, error) {
 		return ProcessingPhaseError, err
 	}
 	klog.V(3).Infoln("Converting to Raw")
-	err = qemuOperations.ConvertToRawStream(url, dp.dataFile, dp.scratchDataDir)
+	err = qemuOperations.ConvertToRawStream(url, dp.dataFile, dp.scratchDataDir, dp.requestImageSize)
 	if err != nil {
 		return ProcessingPhaseError, errors.Wrap(err, "Conversion to Raw failed")
 	}

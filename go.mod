@@ -3,11 +3,11 @@ module kubevirt.io/containerized-data-importer
 go 1.13
 
 require (
-	github.com/PuerkitoBio/purell v1.0.0
-	github.com/PuerkitoBio/urlesc v0.0.0-20160726150825-5bd2802263f2
+	github.com/PuerkitoBio/purell v1.1.0
+	github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
 	github.com/appscode/jsonpatch v0.0.0-20190108182946-7c0e3b262f30
-	github.com/beorn7/perks v0.0.0-20160229213445-3ac7bf7a47d1
-	github.com/davecgh/go-spew v1.1.1-0.20170626231645-782f4967f2dc
+	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
+	github.com/davecgh/go-spew v1.1.1
 	github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96
 	github.com/emicklei/go-restful v2.6.0+incompatible
 	github.com/emicklei/go-restful-openapi v1.0.0
@@ -22,7 +22,7 @@ require (
 	github.com/go-openapi/swag v0.17.2
 	github.com/gogo/protobuf v0.0.0-20171007142547-342cbe0a0415
 	github.com/golang/groupcache v0.0.0-20160516000752-02826c3e7903
-	github.com/golang/protobuf v1.1.0
+	github.com/golang/protobuf v1.2.0
 	github.com/google/btree v0.0.0-20160524151835-7d79101e329e
 	github.com/google/gofuzz v0.0.0-20161122191042-44d81051d367
 	github.com/googleapis/gnostic v0.0.0-20170729233727-0c5108395e2d
@@ -34,7 +34,7 @@ require (
 	github.com/json-iterator/go v0.0.0-20180701071628-ab8a2e0c74be
 	github.com/kelseyhightower/envconfig v1.3.0
 	github.com/kubernetes-csi/external-snapshotter v1.1.1-0.20190509204040-e49856eb417c
-	github.com/mailru/easyjson v0.0.0-20170624190925-2f5df55504eb
+	github.com/mailru/easyjson v0.0.0-20180823135443-60711f1a8329
 	github.com/matttproud/golang_protobuf_extensions v1.0.1
 	github.com/minio/minio-go v3.0.3-0.20180307105924-9e124ec59547+incompatible
 	github.com/mitchellh/go-homedir v1.1.0
@@ -48,9 +48,9 @@ require (
 	github.com/peterbourgon/diskv v2.0.1+incompatible
 	github.com/pkg/errors v0.8.2-0.20190227000051-27936f6d90f9
 	github.com/prometheus/client_golang v0.9.2
-	github.com/prometheus/client_model v0.0.0-20150212101744-fa8ad6fec335
-	github.com/prometheus/common v0.0.0-20170427095455-13ba4ddd0caa
-	github.com/prometheus/procfs v0.0.0-20170519190837-65c1f6f8f0fc
+	github.com/prometheus/client_model v0.0.0-20180712105110-5c3871d89910
+	github.com/prometheus/common v0.0.0-20181126121408-4724e9255275
+	github.com/prometheus/procfs v0.0.0-20181204211112-1dc9a6cbc91a
 	github.com/spf13/pflag v1.0.1
 	github.com/ulikunitz/xz v0.5.6
 	github.com/xi2/xz v0.0.0-20171230120015-48954b6210f8
@@ -58,16 +58,16 @@ require (
 	go.uber.org/multierr v1.1.1-0.20180122172545-ddea229ff1df
 	go.uber.org/zap v1.9.2-0.20180814183419-67bc79d13d15
 	golang.org/x/crypto v0.0.0-20180808211826-de0752318171
-	golang.org/x/net v0.0.0-20180124060956-0ed95abb35c4
+	golang.org/x/net v0.0.0-20181201002055-351d144fa1fc
 	golang.org/x/oauth2 v0.0.0-20170412232759-a6bd8cefa181
-	golang.org/x/sys v0.0.0-20171031081856-95c657629925
-	golang.org/x/text v0.0.0-20170810154203-b19bf474d317
+	golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e
+	golang.org/x/text v0.3.0
 	golang.org/x/time v0.0.0-20161028155119-f51c12702a4d
 	google.golang.org/appengine v1.6.1-0.20190515044707-311d3c5cf937
 	gopkg.in/fsnotify/fsnotify.v1 v1.4.7
 	gopkg.in/inf.v0 v0.9.0
 	gopkg.in/square/go-jose.v2 v2.3.1
-	gopkg.in/tomb.v1 v1.0.0-20140529071818-c131134a1947
+	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7
 	gopkg.in/yaml.v2 v2.2.1
 	k8s.io/api v0.0.0-20190222213804-5cb15d344471
 	k8s.io/apiextensions-apiserver v0.0.0-20190228180357-d002e88f6236

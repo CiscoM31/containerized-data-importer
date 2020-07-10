@@ -121,7 +121,12 @@ func (hs *HTTPDataSource) Info() (ProcessingPhase, error) {
 		return ProcessingPhaseTransferScratch, nil
 	}
 	if !hs.readers.Convert {
-		return ProcessingPhaseTransferDataFile, nil
+		// HXAP HACK ALERT
+		// header says no conversion needed, CDI cannot yet handle this correctly and bombs out
+		// in validation of the image on a block volume. This is mainly seen with ISO files
+		// Will validate on scratch and then write to block device.
+		// return ProcessingPhaseTransferDataFile, nil
+		return ProcessingPhaseTransferScratch, nil
 	}
 	return ProcessingPhaseTransferScratch, nil
 }
