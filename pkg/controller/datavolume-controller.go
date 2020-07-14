@@ -723,7 +723,11 @@ func (c *DataVolumeController) updateDataVolumeStatus(dataVolume *cdiv1.DataVolu
 			}
 			_, ok = pvc.Annotations[AnnCloneRequest]
 			if ok {
-				dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
+				if pvc.Status.Phase == corev1.ClaimBound {
+					dataVolumeCopy.Status.Phase = cdiv1.Succeeded
+				} else {
+					dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
+				}
 				c.updateCloneStatusPhase(pvc, dataVolumeCopy, &event)
 			}
 			_, ok = pvc.Annotations[AnnUploadRequest]
@@ -983,6 +987,7 @@ func newPersistentVolumeClaim(dataVolume *cdiv1.DataVolume) (*corev1.PersistentV
 		} else {
 			annotations[AnnCloneRequest] = dataVolume.Namespace + "/" + dataVolume.Spec.Source.PVC.Name
 		}
+		annotations[AnnCloneOf] = "true"
 	} else if dataVolume.Spec.Source.Upload != nil {
 		annotations[AnnUploadRequest] = ""
 	} else if dataVolume.Spec.Source.Blank != nil {
@@ -992,7 +997,7 @@ func newPersistentVolumeClaim(dataVolume *cdiv1.DataVolume) (*corev1.PersistentV
 		return nil, errors.Errorf("no source set for datavolume")
 	}
 
-	return &corev1.PersistentVolumeClaim{
+	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dataVolume.Name,
 			Namespace:   dataVolume.Namespace,
@@ -1007,5 +1012,16 @@ func newPersistentVolumeClaim(dataVolume *cdiv1.DataVolume) (*corev1.PersistentV
 			},
 		},
 		Spec: *dataVolume.Spec.PVC,
-	}, nil
+	}
+
+	// If PVC Source is set. Set the DataSource
+	if dataVolume.Spec.Source.PVC != nil {
+		apigroup := ""
+		pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{}
+		pvc.Spec.DataSource.Kind = "PersistentVolumeClaim"
+		pvc.Spec.DataSource.Name = dataVolume.Spec.Source.PVC.Name
+		pvc.Spec.DataSource.APIGroup = &apigroup
+	}
+
+	return pvc, nil
 }

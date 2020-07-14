@@ -641,9 +641,11 @@ func ValidateCanCloneSourceAndTargetSpec(sourceSpec, targetSpec *v1.PersistentVo
 		return errors.New("Target resources requests storage size is smaller than the source")
 	}
 
-	// Verify that the source is not in block volume mode.
-	if sourceSpec.VolumeMode != nil && *sourceSpec.VolumeMode == v1.PersistentVolumeBlock {
-		return errors.New("Cannot clone from volume that is in block mode")
+	// Verify that the source of the same volume mode
+	if sourceSpec.VolumeMode != nil && targetSpec.VolumeMode != nil {
+		if *sourceSpec.VolumeMode != *targetSpec.VolumeMode {
+			return errors.New("Cannot clone a different volume mode source")
+		}
 	}
 	// Can clone.
 	return nil
