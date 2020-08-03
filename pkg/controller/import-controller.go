@@ -118,6 +118,8 @@ func (ic *ImportController) requiresScratchSpace(pvc *v1.PersistentVolumeClaim) 
 			scratchRequired = true
 		case SourceRegistry:
 			scratchRequired = true
+		case SourceHTTP:
+			scratchRequired = true
 		}
 	}
 	value, ok := pvc.Annotations[AnnRequiresScratch]
@@ -225,8 +227,6 @@ func (ic *ImportController) createImporterPod(pvc *v1.PersistentVolumeClaim, pvc
 
 	requiresScratch := ic.requiresScratchSpace(pvc)
 
-	// always require scratch space. This is to workaround qemu convert hang while streaming in.
-	requiresScratch = true
 	if requiresScratch {
 		name := pvc.Name + "-scratch"
 		scratchPvcName = &name
