@@ -1,6 +1,7 @@
 package tests_test
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"os/exec"
@@ -23,7 +24,7 @@ const (
 )
 
 var _ = Describe("Cert rotation tests", func() {
-	f := framework.NewFrameworkOrDie("operator-test")
+	f := framework.NewFramework("certrotation-test")
 
 	Context("with port forward", func() {
 		DescribeTable("check secrets re read", func(serviceName, secretName string) {
@@ -67,24 +68,24 @@ var _ = Describe("Cert rotation tests", func() {
 
 			}, 2*time.Minute, 1*time.Second).ShouldNot(HaveOccurred())
 
-		}, Entry("apiserver", "cdi-api", "cdi-apiserver-server-cert"),
-			Entry("uploadproxy", "cdi-uploadproxy", "cdi-uploadproxy-server-cert"))
+		}, Entry("[test_id:3925]apiserver", "cdi-api", "cdi-apiserver-server-cert"),
+			Entry("[test_id:3926]uploadproxy", "cdi-uploadproxy", "cdi-uploadproxy-server-cert"))
 	})
 
 	DescribeTable("check secrets updated", func(secretName, configMapName string) {
 		var oldBundle *corev1.ConfigMap
-		oldSecret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(secretName, metav1.GetOptions{})
+		oldSecret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(context.TODO(), secretName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		if configMapName != "" {
-			oldBundle, err = f.K8sClient.CoreV1().ConfigMaps(f.CdiInstallNs).Get(configMapName, metav1.GetOptions{})
+			oldBundle, err = f.K8sClient.CoreV1().ConfigMaps(f.CdiInstallNs).Get(context.TODO(), configMapName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 		}
 
 		rotateCert(f, secretName)
 
 		Eventually(func() bool {
-			updatedSecret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(secretName, metav1.GetOptions{})
+			updatedSecret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(context.TODO(), secretName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 
 			return updatedSecret.Annotations[notAfter] != oldSecret.Annotations[notAfter] &&
@@ -95,7 +96,7 @@ var _ = Describe("Cert rotation tests", func() {
 
 		if configMapName != "" {
 			Eventually(func() bool {
-				updatedBundle, err := f.K8sClient.CoreV1().ConfigMaps(f.CdiInstallNs).Get(configMapName, metav1.GetOptions{})
+				updatedBundle, err := f.K8sClient.CoreV1().ConfigMaps(f.CdiInstallNs).Get(context.TODO(), configMapName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				return updatedBundle.Data["ca-bundle.crt"] != oldBundle.Data["ca-bundle.crt"]
@@ -107,17 +108,17 @@ var _ = Describe("Cert rotation tests", func() {
 		//Entry("apiserver ca", "cdi-apiserver-signer", "cdi-apiserver-signer-bundle"),
 		// done in test above
 		//Entry("apiserver cert", "cdi-apiserver-server-cert", ""),
-		Entry("uploadproxy ca", "cdi-uploadproxy-signer", "cdi-uploadproxy-signer-bundle"),
+		Entry("[test_id:3927]uploadproxy ca", "cdi-uploadproxy-signer", "cdi-uploadproxy-signer-bundle"),
 		//done in test above
 		//Entry("uploadproxy cert", "cdi-uploadproxy-server-cert", ""),
-		Entry("uploadserver ca", "cdi-uploadserver-signer", "cdi-uploadserver-signer-bundle"),
-		Entry("uploadserver client ca", "cdi-uploadserver-client-signer", "cdi-uploadserver-client-signer-bundle"),
-		Entry("uploadserver client cert", "cdi-uploadserver-client-cert", ""),
+		Entry("[test_id:3928]uploadserver ca", "cdi-uploadserver-signer", "cdi-uploadserver-signer-bundle"),
+		Entry("[test_id:3929]uploadserver client ca", "cdi-uploadserver-client-signer", "cdi-uploadserver-client-signer-bundle"),
+		Entry("[test_id:3930]uploadserver client cert", "cdi-uploadserver-client-cert", ""),
 	)
 })
 
 func rotateCert(f *framework.Framework, secretName string) {
-	secret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(secretName, metav1.GetOptions{})
+	secret, err := f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Get(context.TODO(), secretName, metav1.GetOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
 	nb, ok := secret.Annotations[notBefore]
@@ -130,7 +131,7 @@ func rotateCert(f *framework.Framework, secretName string) {
 	newSecret := secret.DeepCopy()
 	newSecret.Annotations[notAfter] = notBefore.Add(time.Second).Format(time.RFC3339)
 
-	newSecret, err = f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Update(newSecret)
+	newSecret, err = f.K8sClient.CoreV1().Secrets(f.CdiInstallNs).Update(context.TODO(), newSecret, metav1.UpdateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 }
 

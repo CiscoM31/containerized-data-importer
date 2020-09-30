@@ -21,7 +21,7 @@ The following statuses are possible.
 DataVolumes are an abstraction on top of the annotations one can put on PVCs to trigger CDI. As such DVs have the notion of a 'source' that allows one to specify the source of the data. To import data from an external source, the source has to be either 'http' ,'S3' or 'registry'. If your source requires authentication, you can also pass in a `secretRef` to a Kubernetes [Secret](../manifest/example/endpoint-secret.yaml) containing the authentication information.  TLS certificates for https/registry sources may be specified in a [ConfigMap](../manifests/example/cert-configmap.yaml) and referenced by `certConfigMap`.  `secretRef` and `certConfigMap` must be in the same namespace as the DataVolume.
 
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: "example-import-dv"
@@ -56,7 +56,7 @@ If the content type is kubevirt, the source will be treated as a virtual disk, c
 An example of an archive from an http source:
 
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: "example-import-dv"
@@ -78,7 +78,7 @@ spec:
 You can also use a PVC as an input source for a DV which will cause a clone to happen of the original PVC. You set the 'source' to be PVC, and specify the name and namespace of the PVC you want to have cloned. Be sure to specify the right amount of space to allocate for the new DV or the clone can't complete.
 
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: "example-clone-dv"
@@ -99,7 +99,7 @@ spec:
 ## Upload Data Volumes
 You can upload a virtual disk image directly into a data volume as well, just like with PVCs. The steps to follow are identical as [upload for PVC](upload.md) except that the yaml for a Data Volume is slightly different.
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: example-upload-dv
@@ -117,7 +117,7 @@ spec:
 ## Blank Data Volume
 You can create a blank virtual disk image in a Data Volume as well, with the following yaml:
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: example-blank-dv
@@ -135,7 +135,7 @@ spec:
 ## Image IO Data Volume
 Image IO sources are sources from oVirt imageio endpoints. In order to use these endpoints you will need an oVirt installation with imageIO enabled. You will then be able to import disk images from oVirt into KubeVirt. The diskId can be obtained from the oVirt webadmin UI or REST api.
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: "test-dv"
@@ -156,12 +156,39 @@ spec:
 [Get secret example](../manifests/example/endpoint-secret.yaml)
 [Get certificate example](../manifests/example/cert-configmap.yaml)
 
+## VDDK Data Volume
+VDDK sources come from VMware vCenter or ESX endpoints. You will need a secret containing administrative credentials for the API provided by the VMware endpoint, as well as a special sidecar image containing the non-redistributable VDDK library folder. Instructions for creating a VDDK image can be found [here](https://docs.openshift.com/container-platform/4.3/cnv/cnv_virtual_machines/cnv_importing_vms/cnv-importing-vmware-vm.html#cnv-creating-vddk-image_cnv-importing-vmware-vm), with the addendum that the ConfigMap should exist in the current CDI namespace and not 'openshift-cnv'. Note that version 7 of the VDDK is not supported yet.
+
+```yaml
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: "vddk-dv"
+spec:
+    source:
+        vddk:
+           backingFile: "[iSCSI_Datastore] vm/vm_1.vmdk" # From 'Hard disk'/'Disk File' in vCenter/ESX VM settings
+           url: "https://vcenter.corp.com"
+           uuid: "52260566-b032-36cb-55b1-79bf29e30490"
+           thumbprint: "20:6C:8A:5D:44:40:B3:79:4B:28:EA:76:13:60:90:6E:49:D9:D9:A3" # SSL fingerprint of vCenter/ESX host
+           secretRef: "vddk-credentials"
+        pvc:
+           accessModes:
+             - ReadWriteOnce
+           resources:
+             requests:
+               storage: "32Gi"
+```
+[Get secret example](../manifests/example/endpoint-secret.yaml)
+[Get VDDK ConfigMap example](../manifests/example/vddk-configmap.yaml)
+[Ways to find thumbprint](https://libguestfs.org/nbdkit-vddk-plugin.1.html#THUMBPRINTS)
+
 ## Block Volume Mode
 You can import, clone and upload a disk image to a raw block persistent volume.
 This is done by assigning the value 'Block' to the PVC volumeMode field in the DataVolume yaml.
 The following is an exmaple to import disk image to a raw block volume:
 ```yaml
-apiVersion: cdi.kubevirt.io/v1alpha1
+apiVersion: cdi.kubevirt.io/v1beta1
 kind: DataVolume
 metadata:
   name: "example-import-dv"
@@ -179,6 +206,21 @@ spec:
       requests:
         storage: "64Mi"
 ```
+
+## Conditions
+The DataVolume status object has conditions. There are 3 conditions available for DataVolumes
+* Ready
+* Bound
+* Running
+
+The running and ready conditions are mutually exclusive, if running is true, then ready cannot be true and vice versa. Each condition has the following fields:
+* Type (Ready/Bound/Running)
+* Status (True/False)
+* LastTransitionTime The timestamp when the last transition happened.
+* LastHeartbeatTime the timestamp the last time anything on the condition was updated.
+* Reason The reason the status transitioned to a new value, this is a camel cased single word, similar to an EventReason in events.
+* Message A detailed messages expanding on the reason of the transition. For instance if Running went from True to False, the reason will be the container exit reason, and the message will be the container exit message, which explains why the container exitted.
+
 
 ## Kubevirt integration
 [Kubevirt](https://github.com/kubevirt/kubevirt) is an extension to Kubernetes that allows one to run Virtual Machines(VM) on the same infra structure as the containers managed by Kubernetes. CDI provides a mechanism to get a disk image into a PVC in order for Kubevirt to consume it. The following steps have to be taken in order for Kubevirt to consume a CDI provided disk image.

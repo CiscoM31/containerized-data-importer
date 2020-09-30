@@ -24,7 +24,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/pkg/image"
@@ -58,6 +59,9 @@ func main() {
 	certDir, _ := util.ParseEnvVar(common.ImporterCertDirVar, false)
 	insecureTLS, _ := strconv.ParseBool(os.Getenv(common.InsecureTLSVar))
 	diskID, _ := util.ParseEnvVar(common.ImporterDiskID, false)
+	uuid, _ := util.ParseEnvVar(common.ImporterUUID, false)
+	backingFile, _ := util.ParseEnvVar(common.ImporterBackingFile, false)
+	thumbprint, _ := util.ParseEnvVar(common.ImporterThumbprint, false)
 
 	//Registry import currently support kubevirt content type only
 	if contentType != string(cdiv1.DataVolumeKubeVirt) && (source == controller.SourceRegistry || source == controller.SourceImageio) {
@@ -80,7 +84,11 @@ func main() {
 	}
 
 	dataDir := common.ImporterDataDir
-	availableDestSpace := util.GetAvailableSpaceByVolumeMode(volumeMode)
+	availableDestSpace, err := util.GetAvailableSpaceByVolumeMode(volumeMode)
+	if err != nil {
+		klog.Errorf("%+v", err)
+		os.Exit(1)
+	}
 	if source == controller.SourceNone && contentType == string(cdiv1.DataVolumeKubeVirt) {
 		requestImageSizeQuantity := resource.MustParse(imageSize)
 		minSizeQuantity := util.MinQuantity(resource.NewScaledQuantity(availableDestSpace, 0), &requestImageSizeQuantity)
@@ -135,6 +143,16 @@ func main() {
 			if err != nil {
 				klog.Errorf("%+v", err)
 				err = util.WriteTerminationMessage(fmt.Sprintf("Unable to connect to s3 data source: %+v", err))
+				if err != nil {
+					klog.Errorf("%+v", err)
+				}
+				os.Exit(1)
+			}
+		case controller.SourceVDDK:
+			dp, err = importer.NewVDDKDataSource(ep, acc, sec, thumbprint, uuid, backingFile)
+			if err != nil {
+				klog.Errorf("%+v", err)
+				err = util.WriteTerminationMessage(fmt.Sprintf("Unable to connect to vddk data source: %+v", err))
 				if err != nil {
 					klog.Errorf("%+v", err)
 				}

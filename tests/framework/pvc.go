@@ -1,15 +1,21 @@
 package framework
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
-
 	k8sv1 "k8s.io/api/core/v1"
+	apierrs "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	"kubevirt.io/containerized-data-importer/pkg/util/naming"
 
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/tests/utils"
@@ -18,6 +24,18 @@ import (
 // CreatePVCFromDefinition is a wrapper around utils.CreatePVCFromDefinition
 func (f *Framework) CreatePVCFromDefinition(def *k8sv1.PersistentVolumeClaim) (*k8sv1.PersistentVolumeClaim, error) {
 	return utils.CreatePVCFromDefinition(f.K8sClient, f.Namespace.Name, def)
+}
+
+// CreateBoundPVCFromDefinition is a wrapper around utils.CreatePVCFromDefinition that also force binds pvc on
+// on WaitForFirstConsumer storage class by executing f.ForceBindIfWaitForFirstConsumer(pvc)
+func (f *Framework) CreateBoundPVCFromDefinition(def *k8sv1.PersistentVolumeClaim) (*k8sv1.PersistentVolumeClaim, error) {
+	pvc, err := utils.CreatePVCFromDefinition(f.K8sClient, f.Namespace.Name, def)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	pvc, err = utils.WaitForPVC(f.K8sClient, pvc.Namespace, pvc.Name)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	f.ForceBindIfWaitForFirstConsumer(pvc)
+	return pvc, nil
 }
 
 // DeletePVC is a wrapper around utils.DeletePVC
@@ -45,30 +63,76 @@ func (f *Framework) FindPVC(pvcName string) (*k8sv1.PersistentVolumeClaim, error
 	return utils.FindPVC(f.K8sClient, f.Namespace.Name, pvcName)
 }
 
+// ForceBindPvcIfDvIsWaitForFirstConsumer creates a Pod with the PVC for passed in DV mounted under /pvc, which forces the PVC to be scheduled and bound.
+func (f *Framework) ForceBindPvcIfDvIsWaitForFirstConsumer(dv *cdiv1.DataVolume) {
+	fmt.Fprintf(ginkgo.GinkgoWriter, "verifying pvc was created for dv %s\n", dv.Name)
+	// FIXME: #1210, brybacki, tomob this code assumes dvname = pvcname needs to be fixed,
+	pvc, err := utils.WaitForPVC(f.K8sClient, dv.Namespace, dv.Name)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	if f.IsBindingModeWaitForFirstConsumer(pvc.Spec.StorageClassName) {
+		err = utils.WaitForDataVolumePhase(f.CdiClient, dv.Namespace, cdiv1.WaitForFirstConsumer, dv.Name)
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		createConsumerPod(pvc, f)
+	}
+}
+
+// WaitPVCDeletedByUID is a wrapper around utils.WaitPVCDeletedByUID
+func (f *Framework) WaitPVCDeletedByUID(pvcSpec *k8sv1.PersistentVolumeClaim, timeout time.Duration) (bool, error) {
+	return utils.WaitPVCDeletedByUID(f.K8sClient, pvcSpec, timeout)
+}
+
+// ForceBindIfWaitForFirstConsumer creates a Pod with the passed in PVC mounted under /pvc, which forces the PVC to be scheduled and bound.
+func (f *Framework) ForceBindIfWaitForFirstConsumer(targetPvc *k8sv1.PersistentVolumeClaim) {
+	if f.IsBindingModeWaitForFirstConsumer(targetPvc.Spec.StorageClassName) {
+		createConsumerPod(targetPvc, f)
+	}
+}
+
+func createConsumerPod(targetPvc *k8sv1.PersistentVolumeClaim, f *Framework) {
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: creating \"consumer-pod\" to force binding PVC: %s\n", targetPvc.Name)
+	namespace := targetPvc.Namespace
+
+	err := utils.WaitForPersistentVolumeClaimPhase(f.K8sClient, targetPvc.Namespace, k8sv1.ClaimPending, targetPvc.Name)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	podName := naming.GetResourceName("consumer-pod", targetPvc.Name)
+	executorPod, err := utils.CreateNoopPodWithPVC(f.K8sClient, podName, namespace, targetPvc)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	err = utils.WaitTimeoutForPodSucceeded(f.K8sClient, executorPod.Name, namespace, utils.PodWaitForTime)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	err = utils.WaitForPersistentVolumeClaimPhase(f.K8sClient, namespace, k8sv1.ClaimBound, targetPvc.Name)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	utils.DeletePod(f.K8sClient, executorPod, namespace)
+}
+
 // VerifyPVCIsEmpty verifies a passed in PVC is empty, returns true if the PVC is empty, false if it is not. Optionaly, specify node for the pod.
 func VerifyPVCIsEmpty(f *Framework, pvc *k8sv1.PersistentVolumeClaim, node string) (bool, error) {
 	var err error
 	var executorPod *k8sv1.Pod
 	if node != "" {
-		executorPod, err = f.CreateExecutorPodWithPVCSpecificNode("verify-pvc-empty", pvc, node)
+		executorPod, err = f.CreateExecutorPodWithPVCSpecificNode(utils.VerifierPodName, pvc, node)
 	} else {
-		executorPod, err = f.CreateExecutorPodWithPVC("verify-pvc-empty", pvc)
+		executorPod, err = f.CreateExecutorPodWithPVC(utils.VerifierPodName, pvc)
 	}
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	err = f.WaitTimeoutForPodReady(executorPod.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	output, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, "ls -1 /pvc | wc -l")
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, "ls -1 /pvc | wc -l")
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return false, err
 	}
 	found := strings.Compare("0", output) == 0
 	if !found {
 		// Could be that a file system was created and it has 'lost+found' directory in it, check again.
-		output, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, "ls -1 /pvc")
+		output, stderr, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, "ls -1 /pvc")
 		if err != nil {
+			fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 			return false, err
 		}
-		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: files found: %s\n", string(output))
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: files found: %s\n", output)
 		found = strings.Compare("lost+found", output) == 0
 	}
 	return found, nil
@@ -81,7 +145,10 @@ func (f *Framework) CreateAndPopulateSourcePVC(pvcDef *k8sv1.PersistentVolumeCla
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	pod, err := f.CreatePod(utils.NewPodWithPVC(podName, fillCommand, sourcePvc))
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
 	err = f.WaitTimeoutForPodStatus(pod.Name, k8sv1.PodSucceeded, utils.PodWaitForTime)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	err = f.K8sClient.CoreV1().Pods(f.Namespace.Name).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{})
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	return sourcePvc
 }
@@ -105,8 +172,10 @@ func (f *Framework) GetMD5(namespace *k8sv1.Namespace, pvc *k8sv1.PersistentVolu
 	var executorPod *k8sv1.Pod
 	var err error
 
-	executorPod, err = utils.CreateExecutorPodWithPVC(f.K8sClient, "get-md5-"+pvc.Name, namespace.Name, pvc)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
 	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
@@ -115,13 +184,14 @@ func (f *Framework) GetMD5(namespace *k8sv1.Namespace, pvc *k8sv1.PersistentVolu
 		cmd = fmt.Sprintf("head -c %d %s | md5sum", numBytes, fileName)
 	}
 
-	output, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return "", err
 	}
 
 	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: md5sum found %s\n", string(output[:32]))
-	f.DeletePod(executorPod)
+	// Don't delete pod, other verification might happen.
 	return output[:32], nil
 }
 
@@ -130,20 +200,22 @@ func (f *Framework) VerifyBlankDisk(namespace *k8sv1.Namespace, pvc *k8sv1.Persi
 	var executorPod *k8sv1.Pod
 	var err error
 
-	executorPod, err = utils.CreateExecutorPodWithPVC(f.K8sClient, "verify-blank-disk-"+pvc.Name, namespace.Name, pvc)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	defer f.DeletePod(executorPod)
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
 	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 	cmd := fmt.Sprintf("tr -d '\\000' <%s/disk.img | grep -q -m 1 ^ || echo \"All zeros\"", utils.DefaultPvcMountPath)
 
-	output, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
 
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return false, err
 	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: empty file check %s\n", string(output))
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: empty file check %s\n", output)
 	return strings.Compare("All zeros", string(output)) == 0, nil
 }
 
@@ -152,20 +224,22 @@ func (f *Framework) VerifySparse(namespace *k8sv1.Namespace, pvc *k8sv1.Persiste
 	var executorPod *k8sv1.Pod
 	var err error
 
-	executorPod, err = utils.CreateExecutorPodWithPVC(f.K8sClient, "verify-not-sparse-"+pvc.Name, namespace.Name, pvc)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	defer f.DeletePod(executorPod)
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
 	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
 	cmd := fmt.Sprintf("qemu-img info %s/disk.img --output=json", utils.DefaultPvcMountPath)
 
-	output, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
 
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return false, err
 	}
-	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: qemu-img info output %s\n", string(output))
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: qemu-img info output %s\n", output)
 	var info image.ImgInfo
 	err = json.Unmarshal([]byte(output), &info)
 	if err != nil {
@@ -174,24 +248,72 @@ func (f *Framework) VerifySparse(namespace *k8sv1.Namespace, pvc *k8sv1.Persiste
 	return info.VirtualSize >= info.ActualSize, nil
 }
 
-// GetDiskGroup returns the group of a disk image.
-func (f *Framework) GetDiskGroup(namespace *k8sv1.Namespace, pvc *k8sv1.PersistentVolumeClaim) (string, error) {
+// VerifyPermissions returns the group of a disk image.
+func (f *Framework) VerifyPermissions(namespace *k8sv1.Namespace, pvc *k8sv1.PersistentVolumeClaim) (bool, error) {
 	var executorPod *k8sv1.Pod
 	var err error
 
-	executorPod, err = utils.CreateExecutorPodWithPVC(f.K8sClient, "verify-group-"+pvc.Name, namespace.Name, pvc)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	defer f.DeletePod(executorPod)
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
 	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 
-	cmd := fmt.Sprintf("stat -c '%%g' %s/disk.img", utils.DefaultPvcMountPath)
+	cmd := fmt.Sprintf("x=$(ls -ln %s/disk.img); y=($x); echo ${y[0]}", utils.DefaultPvcMountPath)
 
-	output, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
+		return false, err
+	}
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: permissions of disk.img: %s\n", output)
+
+	return strings.Compare(output, "-rw-rw----.") == 0, nil
+}
+
+// GetDiskGroup returns the group of a disk image.
+func (f *Framework) GetDiskGroup(namespace *k8sv1.Namespace, pvc *k8sv1.PersistentVolumeClaim, deletePod bool) (string, error) {
+	var executorPod *k8sv1.Pod
+	var err error
+
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
+	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+
+	cmd := fmt.Sprintf("ls -ln %s/disk.img", utils.DefaultPvcMountPath)
+
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: ln -ln disk.img: %s\n", output)
+	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
+	}
+	cmd = fmt.Sprintf("x=$(ls -ln %s/disk.img); y=($x); echo ${y[3]}", utils.DefaultPvcMountPath)
+
+	output, stderr, err = f.ExecShellInPod(executorPod.Name, namespace.Name, cmd)
+
+	if deletePod {
+		err := f.K8sClient.CoreV1().Pods(namespace.Name).Delete(context.TODO(), executorPod.Name, metav1.DeleteOptions{})
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+		gomega.Eventually(func() bool {
+			if _, err := f.K8sClient.CoreV1().Pods(namespace.Name).Get(context.TODO(), executorPod.Name, metav1.GetOptions{}); err != nil {
+				if apierrs.IsNotFound(err) {
+					return true
+				}
+				gomega.Expect(err).ToNot(gomega.HaveOccurred())
+			}
+			return false
+		}, 90*time.Second, 2*time.Second).Should(gomega.BeTrue())
+	}
 
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return "", err
 	}
+	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: gid of disk.img: %s\n", output)
 	return output, nil
 }
 
@@ -200,12 +322,15 @@ func (f *Framework) VerifyTargetPVCArchiveContent(namespace *k8sv1.Namespace, pv
 	var executorPod *k8sv1.Pod
 	var err error
 
-	executorPod, err = utils.CreateExecutorPodWithPVC(f.K8sClient, "verify-pvc-archive", namespace.Name, pvc)
-	gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	executorPod, err = utils.CreateVerifierPodWithPVC(f.K8sClient, namespace.Name, pvc)
+	if !apierrs.IsAlreadyExists(err) {
+		gomega.Expect(err).ToNot(gomega.HaveOccurred())
+	}
 	err = utils.WaitTimeoutForPodReady(f.K8sClient, executorPod.Name, namespace.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	output, err := f.ExecShellInPod(executorPod.Name, namespace.Name, "ls "+utils.DefaultPvcMountPath+" | wc -l")
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, namespace.Name, "ls "+utils.DefaultPvcMountPath+" | wc -l")
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return false, err
 	}
 	fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: file count found %s\n", string(output))
@@ -218,9 +343,12 @@ func (f *Framework) RunCommandAndCaptureOutput(pvc *k8sv1.PersistentVolumeClaim,
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	err = f.WaitTimeoutForPodReady(executorPod.Name, utils.PodWaitForTime)
 	gomega.Expect(err).ToNot(gomega.HaveOccurred())
-	output, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, cmd)
+	output, stderr, err := f.ExecShellInPod(executorPod.Name, f.Namespace.Name, cmd)
 	if err != nil {
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: stderr: [%s]\n", stderr)
 		return "", err
 	}
+	err = f.K8sClient.CoreV1().Pods(f.Namespace.Name).Delete(context.TODO(), executorPod.Name, metav1.DeleteOptions{})
+	gomega.Expect(err).ToNot(gomega.HaveOccurred())
 	return output, nil
 }

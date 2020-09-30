@@ -22,6 +22,8 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
 
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
@@ -29,9 +31,9 @@ import (
 )
 
 const (
-	controllerResourceName   = "cdi-deployment"
-	controllerServiceAccount = "cdi-sa"
-	prometheusLabel          = common.PrometheusLabel
+	controllerResourceName = "cdi-deployment"
+	prometheusLabel        = common.PrometheusLabel
+	prometheusServiceName  = common.PrometheusServiceName
 )
 
 func createControllerResources(args *FactoryArgs) []runtime.Object {
@@ -44,18 +46,19 @@ func createControllerResources(args *FactoryArgs) []runtime.Object {
 			args.ClonerImage,
 			args.UploadServerImage,
 			args.Verbosity,
-			args.PullPolicy),
+			args.PullPolicy,
+			args.InfraNodePlacement),
 		createInsecureRegConfigMap(),
+		createPrometheusService(),
 	}
 }
 
 func createControllerRoleBinding() *rbacv1.RoleBinding {
-	return utils.CreateRoleBinding(controllerResourceName, controllerResourceName, controllerServiceAccount, "")
+	return utils.ResourcesBuiler.CreateRoleBinding(controllerResourceName, controllerResourceName, common.ControllerServiceAccountName, "")
 }
 
 func createControllerRole() *rbacv1.Role {
-	role := utils.CreateRole(controllerResourceName)
-	role.Rules = []rbacv1.PolicyRule{
+	rules := []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{
 				"",
@@ -81,21 +84,17 @@ func createControllerRole() *rbacv1.Role {
 			},
 		},
 	}
-	return role
+	return utils.ResourcesBuiler.CreateRole(controllerResourceName, rules)
 }
 
 func createControllerServiceAccount() *corev1.ServiceAccount {
-	sa := utils.CreateServiceAccount(controllerServiceAccount)
-	if sa.Annotations == nil {
-		sa.Annotations = make(map[string]string)
-	}
-	sa.Annotations[utils.SCCAnnotation] = "[\"anyuid\"]"
-	return sa
+	return utils.ResourcesBuiler.CreateServiceAccount(common.ControllerServiceAccountName)
 }
 
-func createControllerDeployment(controllerImage, importerImage, clonerImage, uploadServerImage, verbosity, pullPolicy string) *appsv1.Deployment {
-	deployment := utils.CreateDeployment(controllerResourceName, "app", "containerized-data-importer", controllerServiceAccount, int32(1))
-	container := utils.CreateContainer("cdi-controller", controllerImage, verbosity, corev1.PullPolicy(pullPolicy))
+func createControllerDeployment(controllerImage, importerImage, clonerImage, uploadServerImage, verbosity, pullPolicy string, infraNodePlacement *sdkapi.NodePlacement) *appsv1.Deployment {
+	defaultMode := corev1.ConfigMapVolumeSourceDefaultMode
+	deployment := utils.CreateDeployment(controllerResourceName, "app", "containerized-data-importer", common.ControllerServiceAccountName, int32(1), infraNodePlacement)
+	container := utils.CreateContainer("cdi-controller", controllerImage, verbosity, pullPolicy)
 	container.Env = []corev1.EnvVar{
 		{
 			Name:  "IMPORTER_IMAGE",
@@ -126,6 +125,9 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 		},
 		InitialDelaySeconds: 2,
 		PeriodSeconds:       5,
+		FailureThreshold:    3,
+		SuccessThreshold:    1,
+		TimeoutSeconds:      1,
 	}
 	container.VolumeMounts = []corev1.VolumeMount{
 		{
@@ -162,6 +164,7 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 							Path: "id_rsa.pub",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -180,6 +183,7 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 							Path: "tls.key",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -198,6 +202,7 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 							Path: "tls.key",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -214,6 +219,7 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 							Path: "ca-bundle.crt",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -230,6 +236,7 @@ func createControllerDeployment(controllerImage, importerImage, clonerImage, upl
 							Path: "ca-bundle.crt",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -245,7 +252,23 @@ func createInsecureRegConfigMap() *corev1.ConfigMap {
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   common.InsecureRegistryConfigMap,
-			Labels: utils.WithCommonLabels(nil),
+			Labels: utils.ResourcesBuiler.WithCommonLabels(nil),
 		},
 	}
+}
+
+func createPrometheusService() *corev1.Service {
+	service := utils.ResourcesBuiler.CreateService(prometheusServiceName, prometheusLabel, "", nil)
+	service.Spec.Ports = []corev1.ServicePort{
+		{
+			Name: "metrics",
+			Port: 443,
+			TargetPort: intstr.IntOrString{
+				Type:   intstr.String,
+				StrVal: "metrics",
+			},
+			Protocol: corev1.ProtocolTCP,
+		},
+	}
+	return service
 }

@@ -20,6 +20,7 @@
 package webhooks
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -27,13 +28,15 @@ import (
 
 	"k8s.io/api/admission/v1beta1"
 	v1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kvalidation "k8s.io/apimachinery/pkg/util/validation"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 
-	cdicorev1alpha1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 )
 
@@ -57,18 +60,17 @@ func validateSourceURL(sourceURL string) string {
 
 func validateDataVolumeName(name string) []metav1.StatusCause {
 	var causes []metav1.StatusCause
-	// name of data volume cannot be more than 55 characters (not including '-scratch')
-	if len(name) > 55 {
+	if len(name) > kvalidation.DNS1123SubdomainMaxLength {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("Name of data volume cannot be more than 55 characters"),
+			Message: fmt.Sprintf("Name of data volume cannot be more than %d characters", kvalidation.DNS1123SubdomainMaxLength),
 			Field:   "",
 		})
 	}
 	return causes
 }
 
-func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.AdmissionRequest, field *k8sfield.Path, spec *cdicorev1alpha1.DataVolumeSpec) []metav1.StatusCause {
+func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.AdmissionRequest, field *k8sfield.Path, spec *cdiv1.DataVolumeSpec) []metav1.StatusCause {
 	var causes []metav1.StatusCause
 	var url string
 	var sourceType string
@@ -96,8 +98,8 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 		})
 		return causes
 	}
-	// if source types are HTTP, Imageio or S3, check if URL is valid
-	if spec.Source.HTTP != nil || spec.Source.S3 != nil || spec.Source.Imageio != nil {
+	// if source types are HTTP, Imageio, S3 or VDDK, check if URL is valid
+	if spec.Source.HTTP != nil || spec.Source.S3 != nil || spec.Source.Imageio != nil || spec.Source.VDDK != nil {
 		if spec.Source.HTTP != nil {
 			url = spec.Source.HTTP.URL
 			sourceType = field.Child("source", "HTTP", "url").String()
@@ -107,6 +109,9 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 		} else if spec.Source.Imageio != nil {
 			url = spec.Source.Imageio.URL
 			sourceType = field.Child("source", "Imageio", "url").String()
+		} else if spec.Source.VDDK != nil {
+			url = spec.Source.VDDK.URL
+			sourceType = field.Child("source", "VDDK", "url").String()
 		}
 		err := validateSourceURL(url)
 		if err != "" {
@@ -120,17 +125,17 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 	}
 
 	// Make sure contentType is either empty (kubevirt), or kubevirt or archive
-	if spec.ContentType != "" && string(spec.ContentType) != string(cdicorev1alpha1.DataVolumeKubeVirt) && string(spec.ContentType) != string(cdicorev1alpha1.DataVolumeArchive) {
+	if spec.ContentType != "" && string(spec.ContentType) != string(cdiv1.DataVolumeKubeVirt) && string(spec.ContentType) != string(cdiv1.DataVolumeArchive) {
 		sourceType = field.Child("contentType").String()
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("ContentType not one of: %s, %s", cdicorev1alpha1.DataVolumeKubeVirt, cdicorev1alpha1.DataVolumeArchive),
+			Message: fmt.Sprintf("ContentType not one of: %s, %s", cdiv1.DataVolumeKubeVirt, cdiv1.DataVolumeArchive),
 			Field:   sourceType,
 		})
 		return causes
 	}
 
-	if spec.Source.Blank != nil && string(spec.ContentType) == string(cdicorev1alpha1.DataVolumeArchive) {
+	if spec.Source.Blank != nil && string(spec.ContentType) == string(cdiv1.DataVolumeArchive) {
 		sourceType = field.Child("contentType").String()
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
@@ -140,11 +145,11 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 		return causes
 	}
 
-	if spec.Source.Registry != nil && spec.ContentType != "" && string(spec.ContentType) != string(cdicorev1alpha1.DataVolumeKubeVirt) {
+	if spec.Source.Registry != nil && spec.ContentType != "" && string(spec.ContentType) != string(cdiv1.DataVolumeKubeVirt) {
 		sourceType = field.Child("contentType").String()
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
-			Message: fmt.Sprintf("ContentType must be " + string(cdicorev1alpha1.DataVolumeKubeVirt) + " when Source is Registry"),
+			Message: fmt.Sprintf("ContentType must be " + string(cdiv1.DataVolumeKubeVirt) + " when Source is Registry"),
 			Field:   sourceType,
 		})
 		return causes
@@ -161,6 +166,17 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 		}
 	}
 
+	if spec.Source.VDDK != nil {
+		if spec.Source.VDDK.SecretRef == "" || spec.Source.VDDK.UUID == "" || spec.Source.VDDK.BackingFile == "" || spec.Source.VDDK.Thumbprint == "" {
+			causes = append(causes, metav1.StatusCause{
+				Type:    metav1.CauseTypeFieldValueInvalid,
+				Message: fmt.Sprintf("%s source VDDK is not valid", field.Child("source", "VDDK").String()),
+				Field:   field.Child("source", "VDDK").String(),
+			})
+			return causes
+		}
+	}
+
 	if spec.Source.PVC != nil {
 		if spec.Source.PVC.Namespace == "" || spec.Source.PVC.Name == "" {
 			causes = append(causes, metav1.StatusCause{
@@ -171,8 +187,8 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 			return causes
 		}
 
-		if wh.client != nil && request.Operation == v1beta1.Create {
-			sourcePVC, err := wh.client.CoreV1().PersistentVolumeClaims(spec.Source.PVC.Namespace).Get(spec.Source.PVC.Name, metav1.GetOptions{})
+		if request.Operation == v1beta1.Create {
+			sourcePVC, err := wh.client.CoreV1().PersistentVolumeClaims(spec.Source.PVC.Namespace).Get(context.TODO(), spec.Source.PVC.Name, metav1.GetOptions{})
 			if err != nil {
 				if k8serrors.IsNotFound(err) {
 					causes = append(causes, metav1.StatusCause{
@@ -222,6 +238,14 @@ func (wh *dataVolumeValidatingWebhook) validateDataVolumeSpec(request *v1beta1.A
 	}
 
 	accessModes := spec.PVC.AccessModes
+	if len(accessModes) == 0 {
+		causes = append(causes, metav1.StatusCause{
+			Type:    metav1.CauseTypeFieldValueInvalid,
+			Message: fmt.Sprintf("Required value: at least 1 access mode is required"),
+			Field:   field.Child("PVC", "accessModes").String(),
+		})
+		return causes
+	}
 	if len(accessModes) > 1 {
 		causes = append(causes, metav1.StatusCause{
 			Type:    metav1.CauseTypeFieldValueInvalid,
@@ -248,7 +272,7 @@ func (wh *dataVolumeValidatingWebhook) Admit(ar v1beta1.AdmissionReview) *v1beta
 	}
 
 	raw := ar.Request.Object.Raw
-	dv := cdicorev1alpha1.DataVolume{}
+	dv := cdiv1.DataVolume{}
 
 	err := json.Unmarshal(raw, &dv)
 	if err != nil {
@@ -256,13 +280,13 @@ func (wh *dataVolumeValidatingWebhook) Admit(ar v1beta1.AdmissionReview) *v1beta
 	}
 
 	if ar.Request.Operation == v1beta1.Update {
-		oldDV := cdicorev1alpha1.DataVolume{}
+		oldDV := cdiv1.DataVolume{}
 		err = json.Unmarshal(ar.Request.OldObject.Raw, &oldDV)
 		if err != nil {
 			return toAdmissionResponseError(err)
 		}
 
-		if !reflect.DeepEqual(dv.Spec, oldDV.Spec) {
+		if !apiequality.Semantic.DeepEqual(dv.Spec, oldDV.Spec) {
 			klog.Errorf("Cannot update spec for DataVolume %s/%s", dv.GetNamespace(), dv.GetName())
 			var causes []metav1.StatusCause
 			causes = append(causes, metav1.StatusCause{
@@ -280,20 +304,26 @@ func (wh *dataVolumeValidatingWebhook) Admit(ar v1beta1.AdmissionReview) *v1beta
 		return toRejectedAdmissionResponse(causes)
 	}
 
-	if wh.client != nil && ar.Request.Operation == v1beta1.Create {
-		pvc, err := wh.client.CoreV1().PersistentVolumeClaims(dv.GetNamespace()).Get(dv.GetName(), metav1.GetOptions{})
-		if err != nil && !k8serrors.IsNotFound(err) {
-			return toAdmissionResponseError(err)
-		}
-		if pvc != nil && pvc.Name != "" {
-			klog.Errorf("destination PVC %s/%s already exists", dv.GetNamespace(), dv.GetName())
-			var causes []metav1.StatusCause
-			causes = append(causes, metav1.StatusCause{
-				Type:    metav1.CauseTypeFieldValueDuplicate,
-				Message: fmt.Sprintf("Destination PVC already exists"),
-				Field:   k8sfield.NewPath("DataVolume").Child("Name").String(),
-			})
-			return toRejectedAdmissionResponse(causes)
+	if ar.Request.Operation == v1beta1.Create {
+		pvc, err := wh.client.CoreV1().PersistentVolumeClaims(dv.GetNamespace()).Get(context.TODO(), dv.GetName(), metav1.GetOptions{})
+		if err != nil {
+			if !k8serrors.IsNotFound(err) {
+				return toAdmissionResponseError(err)
+			}
+		} else {
+			dvName, ok := pvc.Annotations[controller.AnnPopulatedFor]
+			if !ok || dvName != dv.GetName() {
+				klog.Errorf("destination PVC %s/%s already exists", dv.GetNamespace(), dv.GetName())
+				var causes []metav1.StatusCause
+				causes = append(causes, metav1.StatusCause{
+					Type:    metav1.CauseTypeFieldValueDuplicate,
+					Message: fmt.Sprintf("Destination PVC already exists"),
+					Field:   k8sfield.NewPath("DataVolume").Child("Name").String(),
+				})
+				return toRejectedAdmissionResponse(causes)
+			}
+
+			klog.Infof("Using initialized PVC %s for DataVolume %s", pvc.GetName(), dv.GetName())
 		}
 	}
 

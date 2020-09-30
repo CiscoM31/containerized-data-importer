@@ -1,22 +1,22 @@
 package tests_test
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/blang/semver"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
+	"github.com/coreos/go-semver/semver"
+	route1client "github.com/openshift/client-go/route/clientset/versioned"
 	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/clientcmd"
-
-	route1client "github.com/openshift/client-go/route/clientset/versioned"
 
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
@@ -36,12 +36,12 @@ var (
 
 var _ = Describe("CDI storage class config tests", func() {
 	var (
-		f                   = framework.NewFrameworkOrDie("cdiconfig-test")
+		f                   = framework.NewFramework("cdiconfig-test")
 		defaultSc, secondSc *storagev1.StorageClass
 	)
 
 	BeforeEach(func() {
-		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(metav1.ListOptions{})
+		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(context.TODO(), metav1.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		for _, sc := range storageClasses.Items {
@@ -56,17 +56,17 @@ var _ = Describe("CDI storage class config tests", func() {
 
 	AfterEach(func() {
 		By("Unsetting storage class override if set.")
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		config.Spec.ScratchSpaceStorageClass = nil
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		if secondSc != nil {
 			By("Unmarking default " + secondSc.Name)
 			err := setStorageClassDefault(f, secondSc.Name, false)
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() string {
-				config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+				config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return config.Status.ScratchSpaceStorageClass
 			}, time.Second*30, time.Second).Should(Equal(""))
@@ -77,7 +77,7 @@ var _ = Describe("CDI storage class config tests", func() {
 			err := setStorageClassDefault(f, defaultSc.Name, true)
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() string {
-				config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+				config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				return config.Status.ScratchSpaceStorageClass
 			}, time.Second*30, time.Second).Should(Equal(defaultSc.Name))
@@ -85,22 +85,22 @@ var _ = Describe("CDI storage class config tests", func() {
 		}
 	})
 
-	It("should have the default storage class as its scratchSpaceStorageClass", func() {
+	It("[test_id:3962]should have the default storage class as its scratchSpaceStorageClass", func() {
 		if defaultSc == nil {
 			Skip("No default storage class found, skipping test")
 		}
 		By("Expecting default storage class to be: " + defaultSc.Name)
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(config.Status.ScratchSpaceStorageClass).To(Equal(defaultSc.Name))
 	})
 
-	It("should set the scratch space to blank if no default exists", func() {
+	It("[test_id:3964]should set the scratch space to blank if no default exists", func() {
 		if defaultSc == nil {
 			Skip("No default storage class found, skipping test")
 		}
 		By("Expecting default storage class to be " + defaultSc.Name)
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(defaultSc.Name).To(Equal(config.Status.ScratchSpaceStorageClass))
 
@@ -108,46 +108,46 @@ var _ = Describe("CDI storage class config tests", func() {
 		Expect(err).ToNot(HaveOccurred())
 		By("Expecting default storage class to be blank")
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			return config.Status.ScratchSpaceStorageClass
 		}, time.Second*30, time.Second).Should(Equal(""))
 	})
 
-	It("should keep the default if you specify an invalid override", func() {
+	It("[test_id:3965]should keep the default if you specify an invalid override", func() {
 		if defaultSc == nil {
 			Skip("No default storage class found, skipping test")
 		}
 		By("Expecting default storage class to be " + defaultSc.Name)
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(defaultSc.Name).To(Equal(config.Status.ScratchSpaceStorageClass))
 
 		invalid := "invalidsc"
 		config.Spec.ScratchSpaceStorageClass = &invalid
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Spec.ScratchSpaceStorageClass == nil {
 				return ""
 			}
 			return *config.Spec.ScratchSpaceStorageClass
 		}, time.Second*30, time.Second).Should(Equal(invalid))
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(defaultSc.Name).To(Equal(config.Status.ScratchSpaceStorageClass))
 	})
 
-	It("Should react to switching the default storage class", func() {
-		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(metav1.ListOptions{})
+	It("[test_id:3966]Should react to switching the default storage class", func() {
+		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(context.TODO(), metav1.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		if len(storageClasses.Items) < 2 {
 			Skip("Not enough storage classes to switch default")
 		}
 		By("Expecting default storage class to be " + defaultSc.Name)
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Expect(defaultSc.Name).To(Equal(config.Status.ScratchSpaceStorageClass))
 		By("Switching default sc")
@@ -164,19 +164,19 @@ var _ = Describe("CDI storage class config tests", func() {
 		}
 		By("Expecting default storage class to be " + secondSc.Name)
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			return config.Status.ScratchSpaceStorageClass
 		}, time.Second*30, time.Second).Should(Equal(secondSc.Name))
 	})
 
-	It("Should use the override even if a different default is set", func() {
-		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(metav1.ListOptions{})
+	It("[test_id:3967]Should use the override even if a different default is set", func() {
+		storageClasses, err := f.K8sClient.StorageV1().StorageClasses().List(context.TODO(), metav1.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		if len(storageClasses.Items) < 2 {
 			Skip("Not enough storage classes to test overrider")
 		}
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		// Make sure default is current value.
 		Expect(defaultSc.Name).To(Equal(config.Status.ScratchSpaceStorageClass))
@@ -189,11 +189,11 @@ var _ = Describe("CDI storage class config tests", func() {
 			}
 		}
 		config.Spec.ScratchSpaceStorageClass = &override
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		By("Verifying the override " + override + " is now the scratchspace name")
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			return config.Status.ScratchSpaceStorageClass
 		}, time.Second*30, time.Second).Should(Equal(override))
@@ -202,24 +202,40 @@ var _ = Describe("CDI storage class config tests", func() {
 
 var _ = Describe("CDI ingress config tests, using manifests", func() {
 	var (
-		f            = framework.NewFrameworkOrDie("cdiconfig-test")
+		f            = framework.NewFramework("cdiconfig-test")
+		routeStart   = func() string { return fmt.Sprintf("%s-%s.", routeName, f.CdiInstallNs) }
 		manifestFile string
 	)
 
 	BeforeEach(func() {
-		version, err := semver.Make(tests.GetKubeVersion(f))
-		Expect(err).ToNot(HaveOccurred())
-		minVersion, err := semver.Make("1.14.0")
-		Expect(err).ToNot(HaveOccurred())
-		if !version.GE(minVersion) {
+		version := *semver.New(tests.GetKubeVersion(f))
+		minVersion := *semver.New("1.14.0")
+		if version.LessThan(minVersion) {
 			Skip(fmt.Sprintf("kubernetes version %s, doesn't support network ingress", version.String()))
 		}
-	})
-
-	AfterEach(func() {
-		tests.RunKubectlCommand(f, "delete", "-f", manifestFile, "-n", f.CdiInstallNs)
+		cfg, err := clientcmd.BuildConfigFromFlags(f.Master, f.KubeConfig)
+		Expect(err).ToNot(HaveOccurred())
+		By("Checking if a route exists, we set that as default")
+		openshiftClient, err := route1client.NewForConfig(cfg)
+		Expect(err).ToNot(HaveOccurred())
+		_, err = openshiftClient.RouteV1().Routes(f.CdiInstallNs).Get(context.TODO(), "cdi-uploadproxy", metav1.GetOptions{})
+		if err == nil {
+			By("setting defaultURL to route")
+			Eventually(func() bool {
+				config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
+				Expect(err).ToNot(HaveOccurred())
+				if config.Status.UploadProxyURL == nil {
+					return false
+				}
+				return strings.HasPrefix(*config.Status.UploadProxyURL, routeStart())
+			}, time.Second*30, time.Second).Should(BeTrue())
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			defaultUrl = *config.Status.UploadProxyURL
+		}
+		By("Making sure no url is set")
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return ""
@@ -228,13 +244,25 @@ var _ = Describe("CDI ingress config tests, using manifests", func() {
 		}, time.Second*30, time.Second).Should(Equal(defaultUrl))
 	})
 
-	It("Should properly react to network ingress", func() {
+	AfterEach(func() {
+		tests.RunKubectlCommand(f, "delete", "-f", manifestFile, "-n", f.CdiInstallNs)
+		Eventually(func() string {
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
+			Expect(err).ToNot(HaveOccurred())
+			if config.Status.UploadProxyURL == nil {
+				return ""
+			}
+			return *config.Status.UploadProxyURL
+		}, time.Second*30, time.Second).Should(Equal(defaultUrl))
+	})
+
+	It("[test_id:4949]Should properly react to network ingress", func() {
 		manifestFile = "manifests/ingressNetworkApigroup.yaml"
 		out, err := tests.RunKubectlCommand(f, "create", "-f", manifestFile, "-n", f.CdiInstallNs)
 		fmt.Fprintf(GinkgoWriter, "INFO: Output from kubectl: %s\n", out)
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL != nil {
 				return *config.Status.UploadProxyURL
@@ -243,7 +271,7 @@ var _ = Describe("CDI ingress config tests, using manifests", func() {
 		}, time.Second*30, time.Second).Should(Equal("test.manifest.example.com"))
 	})
 
-	It("Keep current value on no http rule ingress", func() {
+	It("[test_id:4950]Keep current value on no http rule ingress", func() {
 		manifestFile = "manifests/ingressNoHttp.yaml"
 		controllerPod, err := utils.FindPodByPrefix(f.K8sClient, f.CdiInstallNs, cdiDeploymentPodPrefix, "app=containerized-data-importer")
 		Expect(err).ToNot(HaveOccurred())
@@ -253,7 +281,7 @@ var _ = Describe("CDI ingress config tests, using manifests", func() {
 		fmt.Fprintf(GinkgoWriter, "INFO: Output from kubectl: %s\n", out)
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL != nil {
 				return *config.Status.UploadProxyURL
@@ -273,8 +301,8 @@ var _ = Describe("CDI ingress config tests, using manifests", func() {
 
 var _ = Describe("CDI ingress config tests", func() {
 	var (
-		f          = framework.NewFrameworkOrDie("cdiconfig-test")
-		routeStart = fmt.Sprintf("%s-%s.", routeName, f.CdiInstallNs)
+		f          = framework.NewFramework("cdiconfig-test")
+		routeStart = func() string { return fmt.Sprintf("%s-%s.", routeName, f.CdiInstallNs) }
 		ingress    *extensionsv1beta1.Ingress
 	)
 
@@ -284,24 +312,24 @@ var _ = Describe("CDI ingress config tests", func() {
 		By("Checking if a route exists, we set that as default")
 		openshiftClient, err := route1client.NewForConfig(cfg)
 		Expect(err).ToNot(HaveOccurred())
-		_, err = openshiftClient.RouteV1().Routes(f.CdiInstallNs).Get("cdi-uploadproxy", metav1.GetOptions{})
+		_, err = openshiftClient.RouteV1().Routes(f.CdiInstallNs).Get(context.TODO(), "cdi-uploadproxy", metav1.GetOptions{})
 		if err == nil {
 			By("setting defaultURL to route")
 			Eventually(func() bool {
-				config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+				config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				if config.Status.UploadProxyURL == nil {
 					return false
 				}
-				return strings.HasPrefix(*config.Status.UploadProxyURL, routeStart)
+				return strings.HasPrefix(*config.Status.UploadProxyURL, routeStart())
 			}, time.Second*30, time.Second).Should(BeTrue())
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			defaultUrl = *config.Status.UploadProxyURL
 		}
 		By("Making sure no url is set")
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return ""
@@ -312,18 +340,18 @@ var _ = Describe("CDI ingress config tests", func() {
 
 	AfterEach(func() {
 		By("Unsetting override")
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		config.Spec.UploadProxyURLOverride = nil
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		if ingress != nil {
 			By("Cleaning up ingress")
-			err := f.K8sClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Delete(ingress.Name, &metav1.DeleteOptions{})
+			err := f.K8sClient.ExtensionsV1beta1().Ingresses(ingress.Namespace).Delete(context.TODO(), ingress.Name, metav1.DeleteOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			Eventually(func() string {
-				config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+				config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred())
 				if config.Status.UploadProxyURL == nil {
 					return ""
@@ -333,14 +361,14 @@ var _ = Describe("CDI ingress config tests", func() {
 		}
 	})
 
-	It("Should set uploadProxyURL if override is not defined", func() {
+	It("[test_id:3960]Should set uploadProxyURL if override is not defined", func() {
 		// TODO, don't hard code "cdi-uploadproxy", read it from container env of cdi-deployment deployment.
 		ingress = createIngress("test-ingress", f.CdiInstallNs, "cdi-uploadproxy", ingressUrl)
-		_, err := f.K8sClient.ExtensionsV1beta1().Ingresses(f.CdiInstallNs).Create(ingress)
+		_, err := f.K8sClient.ExtensionsV1beta1().Ingresses(f.CdiInstallNs).Create(context.TODO(), ingress, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		By("Expecting uploadproxy url to be " + ingressUrl)
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return ""
@@ -349,21 +377,21 @@ var _ = Describe("CDI ingress config tests", func() {
 		}, time.Second*30, time.Second).Should(Equal(ingressUrl))
 	})
 
-	It("Should keep override uploadProxyURL if override is defined", func() {
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+	It("[test_id:3961]Should keep override uploadProxyURL if override is defined", func() {
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		override := "www.override.tt.org"
 		config.Spec.UploadProxyURLOverride = &override
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		// TODO, don't hard code "cdi-uploadproxy", read it from container env of cdi-deployment deployment.
 		ingress = createIngress("test-ingress", f.CdiInstallNs, "cdi-uploadproxy", ingressUrl)
-		_, err = f.K8sClient.ExtensionsV1beta1().Ingresses(f.CdiInstallNs).Create(ingress)
+		_, err = f.K8sClient.ExtensionsV1beta1().Ingresses(f.CdiInstallNs).Create(context.TODO(), ingress, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		By("Expecting uploadproxy url to be " + override)
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return ""
@@ -375,8 +403,8 @@ var _ = Describe("CDI ingress config tests", func() {
 
 var _ = Describe("CDI route config tests", func() {
 	var (
-		f               = framework.NewFrameworkOrDie("cdiconfig-test")
-		routeStart      = fmt.Sprintf("%s-%s.", routeName, f.CdiInstallNs)
+		f               = framework.NewFramework("cdiconfig-test")
+		routeStart      = func() string { return fmt.Sprintf("%s-%s.", routeName, f.CdiInstallNs) }
 		openshiftClient *route1client.Clientset
 	)
 
@@ -385,42 +413,42 @@ var _ = Describe("CDI route config tests", func() {
 		Expect(err).ToNot(HaveOccurred())
 		openshiftClient, err = route1client.NewForConfig(cfg)
 		Expect(err).ToNot(HaveOccurred())
-		_, err = openshiftClient.RouteV1().Routes(f.CdiInstallNs).Get("cdi-uploadproxy", metav1.GetOptions{})
+		_, err = openshiftClient.RouteV1().Routes(f.CdiInstallNs).Get(context.TODO(), "cdi-uploadproxy", metav1.GetOptions{})
 		if err != nil {
 			Skip("Unable to list routes, skipping")
 		}
 		By("Making sure no url is set to default route")
 		Eventually(func() bool {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return false
 			}
-			return strings.HasPrefix(*config.Status.UploadProxyURL, routeStart)
+			return strings.HasPrefix(*config.Status.UploadProxyURL, routeStart())
 		}, time.Second*30, time.Second).Should(BeTrue())
 	})
 
 	AfterEach(func() {
 		By("Unsetting override")
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		config.Spec.UploadProxyURLOverride = nil
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 	})
 
-	It("Should override uploadProxyURL if override is set", func() {
+	It("[test_id:4951]Should override uploadProxyURL if override is set", func() {
 		if openshiftClient == nil {
 			Skip("Routes not available")
 		}
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		override := "www.override.tt.org"
 		config.Spec.UploadProxyURLOverride = &override
-		config, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
+		config, err = f.CdiClient.CdiV1beta1().CDIConfigs().Update(context.TODO(), config, metav1.UpdateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		Eventually(func() string {
-			config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			Expect(err).ToNot(HaveOccurred())
 			if config.Status.UploadProxyURL == nil {
 				return ""
@@ -431,21 +459,21 @@ var _ = Describe("CDI route config tests", func() {
 })
 
 var _ = Describe("CDIConfig instance management", func() {
-	f := framework.NewFrameworkOrDie("cdiconfig-test")
+	f := framework.NewFramework("cdiconfig-test")
 
-	It("Should re-create the object if deleted", func() {
+	It("[test_id:4952]Should re-create the object if deleted", func() {
 		By("Verifying the object exists")
-		config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+		config, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		// Save the UID, so we can check it against a new one.
 		orgUID := config.GetUID()
 		GinkgoWriter.Write([]byte(fmt.Sprintf("Original CDIConfig UID: %s\n", orgUID)))
 		By("Deleting the object")
-		err = f.CdiClient.CdiV1alpha1().CDIConfigs().Delete(config.Name, &metav1.DeleteOptions{})
+		err = f.CdiClient.CdiV1beta1().CDIConfigs().Delete(context.TODO(), config.Name, metav1.DeleteOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		Eventually(func() bool {
-			newConfig, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+			newConfig, err := f.CdiClient.CdiV1beta1().CDIConfigs().Get(context.TODO(), common.ConfigName, metav1.GetOptions{})
 			if err != nil {
 				return false
 			}
@@ -480,7 +508,7 @@ func createIngress(name, ns, service, hostUrl string) *extensionsv1beta1.Ingress
 }
 
 func setStorageClassDefault(f *framework.Framework, scName string, isDefault bool) error {
-	sc, err := f.K8sClient.StorageV1().StorageClasses().Get(scName, metav1.GetOptions{})
+	sc, err := f.K8sClient.StorageV1().StorageClasses().Get(context.TODO(), scName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -490,9 +518,9 @@ func setStorageClassDefault(f *framework.Framework, scName string, isDefault boo
 	}
 	ann[controller.AnnDefaultStorageClass] = strconv.FormatBool(isDefault)
 	sc.SetAnnotations(ann)
-	_, err = f.K8sClient.StorageV1().StorageClasses().Update(sc)
+	_, err = f.K8sClient.StorageV1().StorageClasses().Update(context.TODO(), sc, metav1.UpdateOptions{})
 	Eventually(func() string {
-		sc, err := f.K8sClient.StorageV1().StorageClasses().Get(scName, metav1.GetOptions{})
+		sc, err := f.K8sClient.StorageV1().StorageClasses().Get(context.TODO(), scName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 		return sc.GetAnnotations()[controller.AnnDefaultStorageClass]
 	}, time.Second*30, time.Second).Should(Equal(strconv.FormatBool(isDefault)))

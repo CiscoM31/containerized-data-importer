@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -8,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,6 +19,14 @@ import (
 	"kubevirt.io/containerized-data-importer/tests/framework"
 	"kubevirt.io/containerized-data-importer/tests/utils"
 )
+
+type sarProxy struct {
+	client kubernetes.Interface
+}
+
+func (p *sarProxy) Create(sar *authv1.SubjectAccessReview) (*authv1.SubjectAccessReview, error) {
+	return p.client.AuthorizationV1().SubjectAccessReviews().Create(context.TODO(), sar, metav1.CreateOptions{})
+}
 
 var _ = Describe("Clone Auth Webhook tests", func() {
 	const serviceAccountName = "cdi-auth-webhook-test"
@@ -97,37 +107,48 @@ var _ = Describe("Clone Auth Webhook tests", func() {
 			},
 		}
 
-		_, err := client.CoreV1().ServiceAccounts(namespace).Create(sa)
+		_, err := client.CoreV1().ServiceAccounts(namespace).Create(context.TODO(), sa, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 	}
 
 	var addPermissionToNamespace = func(client kubernetes.Interface, role *rbacv1.Role, saNamespace, sa, targetNamesace string) {
-		_, err := client.RbacV1().Roles(targetNamesace).Create(role)
+		_, err := client.RbacV1().Roles(targetNamesace).Create(context.TODO(), role, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		rb := &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
-				Name: sa,
+				Name: "rb",
 			},
 			RoleRef: rbacv1.RoleRef{
 				Kind:     "Role",
 				Name:     role.Name,
 				APIGroup: "rbac.authorization.k8s.io",
 			},
-			Subjects: []rbacv1.Subject{
+		}
+
+		if sa != "" {
+			rb.Subjects = []rbacv1.Subject{
 				{
 					Kind:      "ServiceAccount",
 					Name:      sa,
 					Namespace: saNamespace,
 				},
-			},
+			}
+		} else {
+			rb.Subjects = []rbacv1.Subject{
+				{
+					Kind:     "Group",
+					Name:     "system:serviceaccounts",
+					APIGroup: "rbac.authorization.k8s.io",
+				},
+			}
 		}
 
-		_, err = client.RbacV1().RoleBindings(targetNamesace).Create(rb)
+		_, err = client.RbacV1().RoleBindings(targetNamesace).Create(context.TODO(), rb, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
 	}
 
-	f := framework.NewFrameworkOrDie("clone-auth-webhook-test")
+	f := framework.NewFramework("clone-auth-webhook-test")
 
 	Describe("Verify DataVolume validation", func() {
 		Context("Authorization checks", func() {
@@ -145,12 +166,12 @@ var _ = Describe("Clone Auth Webhook tests", func() {
 
 			AfterEach(func() {
 				if targetNamespace != nil {
-					err = f.K8sClient.CoreV1().Namespaces().Delete(targetNamespace.Name, &metav1.DeleteOptions{})
+					err = f.K8sClient.CoreV1().Namespaces().Delete(context.TODO(), targetNamespace.Name, metav1.DeleteOptions{})
 					Expect(err).ToNot(HaveOccurred())
 				}
 			})
 
-			DescribeTable("should deny/allow user when creating datavolume", func(role *rbacv1.Role) {
+			DescribeTable("should deny/allow user when creating datavolume", func(role *rbacv1.Role, saName string) {
 				srcPVCDef := utils.NewPVCDefinition("source-pvc", "1G", nil, nil)
 				srcPVCDef.Namespace = f.Namespace.Name
 				f.CreateAndPopulateSourcePVC(srcPVCDef, "fill-source", fmt.Sprintf("echo \"hello world\" > %s/data.txt", utils.DefaultPvcMountPath))
@@ -161,19 +182,19 @@ var _ = Describe("Clone Auth Webhook tests", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				// can't list dvs in source
-				_, err = client.CdiV1alpha1().DataVolumes(f.Namespace.Name).List(metav1.ListOptions{})
+				_, err = client.CdiV1beta1().DataVolumes(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{})
 				Expect(err).To(HaveOccurred())
 
 				// can list dvs in dest
-				_, err = client.CdiV1alpha1().DataVolumes(targetNamespace.Name).List(metav1.ListOptions{})
+				_, err = client.CdiV1beta1().DataVolumes(targetNamespace.Name).List(context.TODO(), metav1.ListOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				// can't create clone of dv in source
-				_, err = client.CdiV1alpha1().DataVolumes(targetNamespace.Name).Create(targetDV)
+				_, err = client.CdiV1beta1().DataVolumes(targetNamespace.Name).Create(context.TODO(), targetDV, metav1.CreateOptions{})
 				Expect(err).To(HaveOccurred())
 
 				// let's do manual check as well
-				allowed, reason, err := clone.CanServiceAccountClonePVC(f.K8sClient,
+				allowed, reason, err := clone.CanServiceAccountClonePVC(&sarProxy{client: f.K8sClient},
 					srcPVCDef.Namespace,
 					srcPVCDef.Name,
 					targetNamespace.Name,
@@ -183,20 +204,20 @@ var _ = Describe("Clone Auth Webhook tests", func() {
 				Expect(reason).ToNot(BeEmpty())
 				Expect(err).ToNot(HaveOccurred())
 
-				addPermissionToNamespace(f.K8sClient, role, targetNamespace.Name, serviceAccountName, f.Namespace.Name)
+				addPermissionToNamespace(f.K8sClient, role, targetNamespace.Name, saName, f.Namespace.Name)
 
 				// now can list dvs in source
 				Eventually(func() error {
-					_, err = client.CdiV1alpha1().DataVolumes(f.Namespace.Name).List(metav1.ListOptions{})
+					_, err = client.CdiV1beta1().DataVolumes(f.Namespace.Name).List(context.TODO(), metav1.ListOptions{})
 					return err
 				}, 60*time.Second, 2*time.Second).ShouldNot(HaveOccurred())
 
 				// now can create clone of dv in source
-				_, err = client.CdiV1alpha1().DataVolumes(targetNamespace.Name).Create(targetDV)
+				_, err = client.CdiV1beta1().DataVolumes(targetNamespace.Name).Create(context.TODO(), targetDV, metav1.CreateOptions{})
 				Expect(err).ToNot(HaveOccurred())
 
 				// let's do another manual check as well
-				allowed, reason, err = clone.CanServiceAccountClonePVC(f.K8sClient,
+				allowed, reason, err = clone.CanServiceAccountClonePVC(&sarProxy{client: f.K8sClient},
 					srcPVCDef.Namespace,
 					srcPVCDef.Name,
 					targetNamespace.Name,
@@ -206,8 +227,9 @@ var _ = Describe("Clone Auth Webhook tests", func() {
 				Expect(reason).To(BeEmpty())
 				Expect(err).ToNot(HaveOccurred())
 			},
-				Entry("when using explicit CDI permissions", explicitRole),
-				Entry("when using implicit CDI permissions", implicitRole),
+				Entry("[test_id:3935]when using explicit CDI permissions", explicitRole, serviceAccountName),
+				Entry("when using explicit CDI permissions and all serviceaccounts", explicitRole, ""),
+				Entry("[test_id:3936]when using implicit CDI permissions", implicitRole, serviceAccountName),
 			)
 		})
 	})

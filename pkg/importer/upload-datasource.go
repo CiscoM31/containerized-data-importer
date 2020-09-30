@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"k8s.io/klog"
+
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
@@ -50,12 +51,16 @@ func (ud *UploadDataSource) Info() (ProcessingPhase, error) {
 
 // Transfer is called to transfer the data from the source to the passed in path.
 func (ud *UploadDataSource) Transfer(path string) (ProcessingPhase, error) {
-	if util.GetAvailableSpace(path) <= int64(0) {
+	size, err := util.GetAvailableSpace(path)
+	if err != nil {
+		return ProcessingPhaseError, err
+	}
+	if size <= int64(0) {
 		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
 	file := filepath.Join(path, tempFile)
-	err := util.StreamDataToFile(ud.readers.TopReader(), file)
+	err = util.StreamDataToFile(ud.readers.TopReader(), file)
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
@@ -70,6 +75,8 @@ func (ud *UploadDataSource) TransferFile(fileName string) (ProcessingPhase, erro
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
+	// If we successfully wrote to the file, then the parse will succeed.
+	ud.url, _ = url.Parse(fileName)
 	return ProcessingPhaseResize, nil
 }
 
@@ -116,19 +123,23 @@ func (aud *AsyncUploadDataSource) Info() (ProcessingPhase, error) {
 
 // Transfer is called to transfer the data from the source to the passed in path.
 func (aud *AsyncUploadDataSource) Transfer(path string) (ProcessingPhase, error) {
-	if util.GetAvailableSpace(path) <= int64(0) {
+	size, err := util.GetAvailableSpace(path)
+	if err != nil {
+		return ProcessingPhaseError, err
+	}
+	if size <= int64(0) {
 		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
 	file := filepath.Join(path, tempFile)
-	err := util.StreamDataToFile(aud.uploadDataSource.readers.TopReader(), file)
+	err = util.StreamDataToFile(aud.uploadDataSource.readers.TopReader(), file)
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
 	// If we successfully wrote to the file, then the parse will succeed.
 	aud.uploadDataSource.url, _ = url.Parse(file)
 	aud.ResumePhase = ProcessingPhaseProcess
-	return ProcessingPhasePause, nil
+	return ProcessingPhaseValidatePause, nil
 }
 
 // TransferFile is called to transfer the data from the source to the passed in file.
@@ -137,8 +148,10 @@ func (aud *AsyncUploadDataSource) TransferFile(fileName string) (ProcessingPhase
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
+	// If we successfully wrote to the file, then the parse will succeed.
+	aud.uploadDataSource.url, _ = url.Parse(fileName)
 	aud.ResumePhase = ProcessingPhaseResize
-	return ProcessingPhasePause, nil
+	return ProcessingPhaseValidatePause, nil
 }
 
 // Process is called to do any special processing before giving the url to the data back to the processor

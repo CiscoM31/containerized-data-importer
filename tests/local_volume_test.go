@@ -1,15 +1,17 @@
 package tests
 
 import (
-	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
-
+	"context"
 	"fmt"
 	"time"
 
+	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/gomega"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/tests/framework"
@@ -28,10 +30,10 @@ var _ = Describe("[rfe_id:1125][crit:high][vendor:cnv-qe@redhat.com][level:compo
 		node string
 	)
 
-	f := framework.NewFrameworkOrDie("local-volume-func-test")
+	f := framework.NewFramework("local-volume-func-test")
 
 	BeforeEach(func() {
-		nodes, err := f.K8sClient.CoreV1().Nodes().List(metav1.ListOptions{})
+		nodes, err := f.K8sClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		nodeRef := utils.GetSchedulableNode(nodes)

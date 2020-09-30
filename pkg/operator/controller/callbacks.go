@@ -18,87 +18,44 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 
+	"kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/callbacks"
+
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
 	"github.com/go-logr/logr"
-	secv1 "github.com/openshift/api/security/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	sdk "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	cdiv1alpha1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
-	"kubevirt.io/containerized-data-importer/pkg/operator/resources/utils"
 )
-
-const (
-	// ReconcileStatePreCreate is the state before a resource is created
-	ReconcileStatePreCreate ReconcileState = "PRE_CREATE"
-	// ReconcileStatePostCreate is the state sfter a resource is created
-	ReconcileStatePostCreate ReconcileState = "POST_CREATE"
-
-	// ReconcileStatePostRead is the state sfter a resource is read
-	ReconcileStatePostRead ReconcileState = "POST_READ"
-
-	// ReconcileStatePreUpdate is the state before a resource is updated
-	ReconcileStatePreUpdate ReconcileState = "PRE_UPDATE"
-	// ReconcileStatePostUpdate is the state after a resource is updated
-	ReconcileStatePostUpdate ReconcileState = "POST_UPDATE"
-
-	// ReconcileStatePreDelete is the state before a resource is explicitly deleted (probably during upgrade)
-	// don't count on this always being called for your resource
-	// ideally we just let garbage collection do it's thing
-	ReconcileStatePreDelete ReconcileState = "PRE_DELETE"
-	// ReconcileStatePostDelete is the state after a resource is explicitly deleted (probably during upgrade)
-	// don't count on this always being called for your resource
-	// ideally we just let garbage collection do it's thing
-	ReconcileStatePostDelete ReconcileState = "POST_DELETE"
-
-	// ReconcileStateCDIDelete is called during CDI finalizer
-	ReconcileStateCDIDelete ReconcileState = "CDI_DELETE"
-)
-
-// ReconcileState is the current state of the reconcile for a particuar resource
-type ReconcileState string
-
-// ReconcileCallbackArgs contains the data of a ReconcileCallback
-type ReconcileCallbackArgs struct {
-	Logger    logr.Logger
-	Client    client.Client
-	Scheme    *runtime.Scheme
-	Namespace string
-	Resource  *cdiv1alpha1.CDI
-
-	State         ReconcileState
-	DesiredObject runtime.Object
-	CurrentObject runtime.Object
-}
-
-// ReconcileCallback is the callback function
-type ReconcileCallback func(args *ReconcileCallbackArgs) error
 
 func addReconcileCallbacks(r *ReconcileCDI) {
-	r.addCallback(&appsv1.Deployment{}, reconcileDeleteControllerDeployment)
-	r.addCallback(&corev1.ServiceAccount{}, reconcileServiceAccountRead)
-	r.addCallback(&corev1.ServiceAccount{}, reconcileServiceAccounts)
-	r.addCallback(&appsv1.Deployment{}, reconcileCreateRoute)
-	r.addCallback(&appsv1.Deployment{}, reconcileDeleteSecrets)
+	r.reconciler.AddCallback(&appsv1.Deployment{}, reconcileDeleteControllerDeployment)
+	r.reconciler.AddCallback(&corev1.ServiceAccount{}, reconcileServiceAccountRead)
+	r.reconciler.AddCallback(&corev1.ServiceAccount{}, reconcileServiceAccounts)
+	r.reconciler.AddCallback(&corev1.ServiceAccount{}, reconcileCreateSCC)
+	r.reconciler.AddCallback(&appsv1.Deployment{}, reconcileCreateRoute)
+	r.reconciler.AddCallback(&appsv1.Deployment{}, reconcileDeleteSecrets)
+	r.reconciler.AddCallback(&extv1.CustomResourceDefinition{}, reconcileInitializeCRD)
+
 }
 
 func isControllerDeployment(d *appsv1.Deployment) bool {
 	return d.Name == "cdi-deployment"
 }
 
-func reconcileDeleteControllerDeployment(args *ReconcileCallbackArgs) error {
+func reconcileDeleteControllerDeployment(args *callbacks.ReconcileCallbackArgs) error {
 	switch args.State {
-	case ReconcileStatePostDelete, ReconcileStateCDIDelete:
+	case callbacks.ReconcileStatePostDelete, callbacks.ReconcileStateOperatorDelete:
 	default:
 		return nil
 	}
@@ -122,128 +79,62 @@ func reconcileDeleteControllerDeployment(args *ReconcileCallbackArgs) error {
 	err := args.Client.Delete(context.TODO(), deployment, &client.DeleteOptions{
 		PropagationPolicy: &[]metav1.DeletionPropagation{metav1.DeletePropagationForeground}[0],
 	})
+	cr := args.Resource.(runtime.Object)
 	if err != nil && !errors.IsNotFound(err) {
 		args.Logger.Error(err, "Error deleting cdi controller deployment")
+		args.Recorder.Event(cr, corev1.EventTypeWarning, deleteResourceFailed, fmt.Sprintf("Failed to delete deployment %s, %v", deployment.Name, err))
 		return err
 	}
+	args.Recorder.Event(cr, corev1.EventTypeNormal, deleteResourceSuccess, fmt.Sprintf("Deleted deployment %s successfully", deployment.Name))
 
 	if err = deleteWorkerResources(args.Logger, args.Client); err != nil {
 		args.Logger.Error(err, "Error deleting worker resources")
+		args.Recorder.Event(cr, corev1.EventTypeWarning, deleteResourceFailed, fmt.Sprintf("Failed to deleted worker resources %v", err))
 		return err
 	}
+	args.Recorder.Event(cr, corev1.EventTypeNormal, deleteResourceSuccess, "Deleted worker resources successfully")
 
 	return nil
 }
 
-func reconcileCreateRoute(args *ReconcileCallbackArgs) error {
-	if args.State != ReconcileStatePostRead {
+func reconcileCreateRoute(args *callbacks.ReconcileCallbackArgs) error {
+	if args.State != callbacks.ReconcileStatePostRead {
 		return nil
 	}
 
 	deployment := args.CurrentObject.(*appsv1.Deployment)
-	if !isControllerDeployment(deployment) || !checkDeploymentReady(deployment) {
+	if !isControllerDeployment(deployment) || !sdk.CheckDeploymentReady(deployment) {
 		return nil
 	}
 
+	cr := args.Resource.(runtime.Object)
 	if err := ensureUploadProxyRouteExists(args.Logger, args.Client, args.Scheme, deployment); err != nil {
+		args.Recorder.Event(cr, corev1.EventTypeWarning, createResourceFailed, fmt.Sprintf("Failed to ensure upload proxy route exists, %v", err))
 		return err
 	}
+	args.Recorder.Event(cr, corev1.EventTypeNormal, createResourceSuccess, "Successfully ensured upload proxy route exists")
 
 	return nil
 }
 
-func reconcileServiceAccountRead(args *ReconcileCallbackArgs) error {
-	if args.State != ReconcileStatePostRead {
-		return nil
-	}
-
-	do := args.DesiredObject.(*corev1.ServiceAccount)
-	co := args.CurrentObject.(*corev1.ServiceAccount)
-
-	delete(co.Annotations, utils.SCCAnnotation)
-
-	val, exists := do.Annotations[utils.SCCAnnotation]
-	if exists {
-		if co.Annotations == nil {
-			co.Annotations = make(map[string]string)
-		}
-		co.Annotations[utils.SCCAnnotation] = val
-	}
-
-	return nil
-}
-
-func reconcileServiceAccounts(args *ReconcileCallbackArgs) error {
+func reconcileCreateSCC(args *callbacks.ReconcileCallbackArgs) error {
 	switch args.State {
-	case ReconcileStatePreCreate, ReconcileStatePreUpdate, ReconcileStatePostDelete, ReconcileStateCDIDelete:
+	case callbacks.ReconcileStatePreCreate, callbacks.ReconcileStatePostRead:
 	default:
 		return nil
 	}
 
-	var sa *corev1.ServiceAccount
-	if args.CurrentObject != nil {
-		sa = args.CurrentObject.(*corev1.ServiceAccount)
-	} else if args.DesiredObject != nil {
-		sa = args.DesiredObject.(*corev1.ServiceAccount)
-	} else {
-		args.Logger.Info("Received callback with no desired/current object")
+	sa := args.DesiredObject.(*corev1.ServiceAccount)
+	if sa.Name != common.ControllerServiceAccountName {
 		return nil
 	}
 
-	desiredSCCs := []string{}
-	saName := fmt.Sprintf("system:serviceaccount:%s:%s", sa.Namespace, sa.Name)
-
-	switch args.State {
-	case ReconcileStatePreCreate, ReconcileStatePreUpdate:
-		val, exists := sa.Annotations[utils.SCCAnnotation]
-		if exists {
-			if err := json.Unmarshal([]byte(val), &desiredSCCs); err != nil {
-				args.Logger.Error(err, "Error unmarshalling data")
-				return err
-			}
-		}
-	default:
-		// want desiredSCCs empty because deleting resource/CDI
-	}
-
-	listObj := &secv1.SecurityContextConstraintsList{}
-	if err := args.Client.List(context.TODO(), listObj, &client.ListOptions{}); err != nil {
-		if meta.IsNoMatchError(err) {
-			// not openshift
-			return nil
-		}
-		args.Logger.Error(err, "Error listing SCCs")
+	cr := args.Resource.(runtime.Object)
+	if err := ensureSCCExists(args.Logger, args.Client, args.Namespace, common.ControllerServiceAccountName); err != nil {
+		args.Recorder.Event(cr, corev1.EventTypeWarning, createResourceFailed, fmt.Sprintf("Failed to ensure SecurityContextConstraint exists, %v", err))
 		return err
 	}
-
-	for _, scc := range listObj.Items {
-		desiredUsers := []string{}
-		add := containsValue(desiredSCCs, scc.Name)
-		seenUser := false
-
-		for _, u := range scc.Users {
-			if u == saName {
-				seenUser = true
-				if !add {
-					continue
-				}
-			}
-			desiredUsers = append(desiredUsers, u)
-		}
-
-		if add && !seenUser {
-			desiredUsers = append(desiredUsers, saName)
-		}
-
-		if !reflect.DeepEqual(desiredUsers, scc.Users) {
-			args.Logger.Info("Doing SCC update", "name", scc.Name, "desired", desiredUsers, "current", scc.Users)
-			scc.Users = desiredUsers
-			if err := args.Client.Update(context.TODO(), &scc); err != nil {
-				args.Logger.Error(err, "Error updating SCC")
-				return err
-			}
-		}
-	}
+	args.Recorder.Event(cr, corev1.EventTypeNormal, createResourceSuccess, "Successfully ensured SecurityContextConstraint exists")
 
 	return nil
 }
@@ -281,13 +172,4 @@ func deleteWorkerResources(l logr.Logger, c client.Client) error {
 	}
 
 	return nil
-}
-
-func containsValue(values []string, value string) bool {
-	for _, v := range values {
-		if v == value {
-			return true
-		}
-	}
-	return false
 }

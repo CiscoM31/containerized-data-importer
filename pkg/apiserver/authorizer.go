@@ -20,13 +20,14 @@
 package apiserver
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"k8s.io/klog"
-
 	"github.com/emicklei/go-restful"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog"
 
 	authorization "k8s.io/api/authorization/v1beta1"
 	authorizationclient "k8s.io/client-go/kubernetes/typed/authorization/v1beta1"
@@ -97,7 +98,7 @@ func (a *authorizor) generateAccessReview(req *restful.Request) (*authorization.
 	}
 
 	// URL example
-	// /apis/upload.cdi.kubevirt.io/v1alpha1/namespaces/default/uploadtokenrequest(s)
+	// /apis/upload.cdi.kubevirt.io/v1beta1/namespaces/default/uploadtokenrequest(s)
 	pathSplit := strings.Split(url.Path, "/")
 	if len(pathSplit) != 7 {
 		return nil, fmt.Errorf("unknown api endpoint %s", url.Path)
@@ -223,7 +224,7 @@ func (a *authorizor) Authorize(req *restful.Request) (bool, string, error) {
 		return false, fmt.Sprintf("%v", err), nil
 	}
 
-	result, err := a.subjectAccessReview.Create(r)
+	result, err := a.subjectAccessReview.Create(context.TODO(), r, metav1.CreateOptions{})
 	if err != nil {
 		return false, "internal server error", err
 	}

@@ -19,11 +19,13 @@ package importer
 import (
 	"fmt"
 	"net/url"
+	"os"
 
 	"github.com/pkg/errors"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog"
+
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
@@ -42,6 +44,8 @@ const (
 	ProcessingPhaseTransferDataDir ProcessingPhase = "TransferDataDir"
 	// ProcessingPhaseTransferDataFile is the phase in which the data source writes data directly to the target file without conversion.
 	ProcessingPhaseTransferDataFile ProcessingPhase = "TransferDataFile"
+	// ProcessingPhaseValidatePause is the phase in which the data processor should validate and then pause.
+	ProcessingPhaseValidatePause ProcessingPhase = "ValidatePause"
 	// ProcessingPhaseProcess is the phase in which the data source processes the data just written to the scratch space.
 	ProcessingPhaseProcess ProcessingPhase = "Process"
 	// ProcessingPhaseConvert is the phase in which the data is taken from the url provided by the source, and it is converted to the target RAW disk image format.
@@ -56,6 +60,13 @@ const (
 	// ProcessingPhaseError is the phase in which we encountered an error and need to exit ungracefully.
 	ProcessingPhaseError ProcessingPhase = "Error"
 )
+
+// ValidationSizeError is an error indication size validation failure.
+type ValidationSizeError struct {
+	err error
+}
+
+func (e ValidationSizeError) Error() string { return e.err.Error() }
 
 // ErrRequiresScratchSpace indicates that we require scratch space.
 var ErrRequiresScratchSpace = fmt.Errorf("scratch space required and none found")
@@ -124,7 +135,7 @@ func NewDataProcessor(dataSource DataSourceInterface, dataFile, dataDir, scratch
 
 // ProcessData is the main synchronous processing loop
 func (dp *DataProcessor) ProcessData() error {
-	if util.GetAvailableSpace(dp.scratchDataDir) > int64(0) {
+	if size, _ := util.GetAvailableSpace(dp.scratchDataDir); size > int64(0) {
 		// Clean up before trying to write, in case a previous attempt left a mess. Note the deferred cleanup is intentional.
 		if err := CleanDir(dp.scratchDataDir); err != nil {
 			return errors.Wrap(err, "Failure cleaning up temporary scratch space")
@@ -132,7 +143,8 @@ func (dp *DataProcessor) ProcessData() error {
 		// Attempt to be a good citizen and clean up my mess at the end.
 		defer CleanDir(dp.scratchDataDir)
 	}
-	if util.GetAvailableSpace(dp.dataDir) > int64(0) {
+
+	if size, _ := util.GetAvailableSpace(dp.dataDir); size > int64(0) {
 		// Clean up data dir before trying to write in case a previous attempt failed and left some stuff behind.
 		if err := CleanDir(dp.dataDir); err != nil {
 			return errors.Wrap(err, "Failure cleaning up target space")
@@ -180,6 +192,13 @@ func (dp *DataProcessor) ProcessDataWithPause() error {
 			if err != nil {
 				err = errors.Wrap(err, "Unable to transfer source data to target file")
 			}
+		case ProcessingPhaseValidatePause:
+			validateErr := dp.validate(dp.source.GetURL())
+			if validateErr != nil {
+				dp.currentPhase = ProcessingPhaseError
+				err = validateErr
+			}
+			dp.currentPhase = ProcessingPhasePause
 		case ProcessingPhaseProcess:
 			dp.currentPhase, err = dp.source.Process()
 			if err != nil {
@@ -211,7 +230,7 @@ func (dp *DataProcessor) validate(url *url.URL) error {
 	klog.V(1).Infoln("Validating image")
 	err := qemuOperations.Validate(url, dp.availableSpace)
 	if err != nil {
-		return errors.Wrap(err, "Image validation failed")
+		return ValidationSizeError{err: err}
 	}
 	return nil
 }
@@ -233,12 +252,20 @@ func (dp *DataProcessor) convert(url *url.URL) (ProcessingPhase, error) {
 
 func (dp *DataProcessor) resize() (ProcessingPhase, error) {
 	// Resize only if we have a resize request, and if the image is on a file system pvc.
-	klog.V(3).Infof("Available space in dataFile: %d", getAvailableSpaceBlockFunc(dp.dataFile))
-	if dp.requestImageSize != "" && getAvailableSpaceBlockFunc(dp.dataFile) < int64(0) {
+	size, _ := getAvailableSpaceBlockFunc(dp.dataFile)
+	klog.V(3).Infof("Available space in dataFile: %d", size)
+	if dp.requestImageSize != "" && size < int64(0) {
 		klog.V(3).Infoln("Resizing image")
 		err := ResizeImage(dp.dataFile, dp.requestImageSize, dp.availableSpace)
 		if err != nil {
 			return ProcessingPhaseError, errors.Wrap(err, "Resize of image failed")
+		}
+	}
+	if dp.dataFile != "" {
+		// Change permissions to 0660
+		err := os.Chmod(dp.dataFile, 0660)
+		if err != nil {
+			err = errors.Wrap(err, "Unable to change permissions of target file")
 		}
 	}
 	return ProcessingPhaseComplete, nil
@@ -274,14 +301,22 @@ func ResizeImage(dataFile, imageSize string, totalTargetSpace int64) error {
 func (dp *DataProcessor) calculateTargetSize() int64 {
 	klog.V(1).Infof("Calculating available size\n")
 	var targetQuantity *resource.Quantity
-	if getAvailableSpaceBlockFunc(dp.dataFile) >= int64(0) {
+	size, err := getAvailableSpaceBlockFunc(dp.dataFile)
+	if err != nil {
+		klog.Error(err)
+	}
+	if size >= int64(0) {
 		// Block volume.
 		klog.V(1).Infof("Checking out block volume size.\n")
-		targetQuantity = resource.NewScaledQuantity(getAvailableSpaceBlockFunc(dp.dataFile), 0)
+		targetQuantity = resource.NewScaledQuantity(size, 0)
 	} else {
 		// File system volume.
 		klog.V(1).Infof("Checking out file system volume size.\n")
-		targetQuantity = resource.NewScaledQuantity(getAvailableSpaceFunc(dp.dataDir), 0)
+		size, err := getAvailableSpaceFunc(dp.dataDir)
+		if err != nil {
+			klog.Error(err)
+		}
+		targetQuantity = resource.NewScaledQuantity(size, 0)
 	}
 	if dp.requestImageSize != "" {
 		klog.V(1).Infof("Request image size not empty.\n")

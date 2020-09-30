@@ -49,12 +49,9 @@ gazelle_dependencies()
 # bazel docker rules
 http_archive(
     name = "io_bazel_rules_docker",
-    sha256 = "d0b345518236e240d513fe0f59f6d3da274f035480273a7eb00af7d216ae2a06",
-    strip_prefix = "rules_docker-0.11.1",
-    urls = [
-        "https://github.com/bazelbuild/rules_docker/releases/download/v0.11.1/rules_docker-v0.11.1.tar.gz",
-        "https://storage.googleapis.com/builddeps/d0b345518236e240d513fe0f59f6d3da274f035480273a7eb00af7d216ae2a06",
-    ],
+    sha256 = "4521794f0fba2e20f3bf15846ab5e01d5332e587e9ce81629c7f96c793bb7036",
+    strip_prefix = "rules_docker-0.14.4",
+    urls = ["https://github.com/bazelbuild/rules_docker/releases/download/v0.14.4/rules_docker-v0.14.4.tar.gz"],
 )
 
 load(
@@ -74,6 +71,9 @@ container_repositories()
 load("@io_bazel_rules_docker//repositories:deps.bzl", container_deps = "deps")
 
 container_deps()
+
+load("@io_bazel_rules_docker//repositories:pip_repositories.bzl", "pip_deps")
+pip_deps()
 
 # RPM rules
 http_archive(
@@ -231,15 +231,6 @@ http_file(
 )
 
 http_file(
-    name = "skopeo",
-    sha256 = "9ae93d78a41face16d842c4da4ffc07bc8b119fbcd23d436b41a44a5643d4dc0",
-    urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/s/skopeo-0.1.41-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/9ae93d78a41face16d842c4da4ffc07bc8b119fbcd23d436b41a44a5643d4dc0",
-    ],
-)
-
-http_file(
     name = "ostree-libs",
     sha256 = "4011ad8b367db9d528d47202d07c287a958d4bd11a56b11618818dcb3be55bc6",
     urls = [
@@ -269,6 +260,14 @@ http_file(
     sha256 = "d8fa0b0947084bce50438b7eaf5a5085abd35e36c69cfb13d5f58e98a258e36f",
     urls = [
         "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-1.02.163-2.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "device-mapper-libs",
+    sha256 = "0ebd37bcd6d2beb5692b7c7e3d94b90a26d45b059696d954b502d85d738b7732",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-libs-1.02.163-2.fc31.x86_64.rpm",
     ],
 )
 
@@ -477,5 +476,61 @@ http_file(
     sha256 = "6805cf46806ab4b5975bccdb06bd33612bde50c0e09fbaafdc91d4498a45ea1b",
     urls = [
         "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/i/isns-utils-libs-0.97-9.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "nbdkit-server",
+    sha256 = "20289b472fc2f075db4d9e993505ff088852417527a06e29e457778cb7f55183",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/nbdkit-server-1.14.2-1.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "nbdkit-vddk-plugin",
+    sha256 = "b9b2eb86b0f8d8355be6a1ef42107526aa7f7d35e5b31af7441750e6b770e9b4",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/nbdkit-vddk-plugin-1.14.2-1.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "libxcrypt-compat",
+    sha256 = "de561ae2ce6394c9b77d5002a52bd9ee9ffea642ffea39bd8fb84d21dce0825c",
+    urls = [
+        "https://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/l/libxcrypt-compat-4.4.17-1.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "libxcrypt",
+    sha256 = "779d1ba6fc8d794c067679f5cb3762b78afe9e44c203a80424a27f94ed4969b6",
+    urls = [
+        "https://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/l/libxcrypt-4.4.17-1.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "mkpasswd",
+    sha256 = "cfe92e9aff4080b8eec8fd0668bcd3e12450a05bf503ba13c739f8e0d7893709",
+    urls = [
+        "https://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/m/mkpasswd-5.5.6-1.fc31.x86_64.rpm",
+    ],
+)
+
+http_file(
+    name = "whois-nls",
+    sha256 = "b345fb463c541c6ea69d5308b41b044fa8ef3739206fb3993c019e5538b449e9",
+    urls = [
+        "https://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/w/whois-nls-5.5.6-1.fc31.noarch.rpm",
+    ],
+)
+
+http_file(
+    name = "golang-github-vmware-govmomi",
+    sha256 = "9ace85ca6a9a6dfd6a9e621fe9012fadd704ba5c9fbf1d042244eb0f250b3115",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/g/golang-github-vmware-govmomi-0.21.0-2.fc31.x86_64.rpm",
     ],
 )

@@ -22,6 +22,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
 
 	utils "kubevirt.io/containerized-data-importer/pkg/operator/resources/utils"
 )
@@ -36,12 +37,12 @@ func createUploadProxyResources(args *FactoryArgs) []runtime.Object {
 		createUploadProxyService(),
 		createUploadProxyRoleBinding(),
 		createUploadProxyRole(),
-		createUploadProxyDeployment(args.UploadProxyImage, args.Verbosity, args.PullPolicy),
+		createUploadProxyDeployment(args.UploadProxyImage, args.Verbosity, args.PullPolicy, args.InfraNodePlacement),
 	}
 }
 
 func createUploadProxyService() *corev1.Service {
-	service := utils.CreateService(uploadProxyResourceName, cdiLabel, uploadProxyResourceName)
+	service := utils.ResourcesBuiler.CreateService(uploadProxyResourceName, cdiLabel, uploadProxyResourceName, nil)
 	service.Spec.Ports = []corev1.ServicePort{
 		{
 			Port: 443,
@@ -56,16 +57,15 @@ func createUploadProxyService() *corev1.Service {
 }
 
 func createUploadProxyServiceAccount() *corev1.ServiceAccount {
-	return utils.CreateServiceAccount(uploadProxyResourceName)
+	return utils.ResourcesBuiler.CreateServiceAccount(uploadProxyResourceName)
 }
 
 func createUploadProxyRoleBinding() *rbacv1.RoleBinding {
-	return utils.CreateRoleBinding(uploadProxyResourceName, uploadProxyResourceName, uploadProxyResourceName, "")
+	return utils.ResourcesBuiler.CreateRoleBinding(uploadProxyResourceName, uploadProxyResourceName, uploadProxyResourceName, "")
 }
 
 func createUploadProxyRole() *rbacv1.Role {
-	role := utils.CreateRole(uploadProxyResourceName)
-	role.Rules = []rbacv1.PolicyRule{
+	rules := []rbacv1.PolicyRule{
 		{
 			APIGroups: []string{
 				"",
@@ -78,12 +78,13 @@ func createUploadProxyRole() *rbacv1.Role {
 			},
 		},
 	}
-	return role
+	return utils.ResourcesBuiler.CreateRole(uploadProxyResourceName, rules)
 }
 
-func createUploadProxyDeployment(image, verbosity, pullPolicy string) *appsv1.Deployment {
-	deployment := utils.CreateDeployment(uploadProxyResourceName, cdiLabel, uploadProxyResourceName, uploadProxyResourceName, int32(1))
-	container := utils.CreateContainer(uploadProxyResourceName, image, verbosity, corev1.PullPolicy(pullPolicy))
+func createUploadProxyDeployment(image, verbosity, pullPolicy string, infraNodePlacement *sdkapi.NodePlacement) *appsv1.Deployment {
+	defaultMode := corev1.ConfigMapVolumeSourceDefaultMode
+	deployment := utils.CreateDeployment(uploadProxyResourceName, cdiLabel, uploadProxyResourceName, uploadProxyResourceName, int32(1), infraNodePlacement)
+	container := utils.CreateContainer(uploadProxyResourceName, image, verbosity, pullPolicy)
 	container.Env = []corev1.EnvVar{
 		{
 			Name: "APISERVER_PUBLIC_KEY",
@@ -110,6 +111,9 @@ func createUploadProxyDeployment(image, verbosity, pullPolicy string) *appsv1.De
 		},
 		InitialDelaySeconds: 2,
 		PeriodSeconds:       5,
+		FailureThreshold:    3,
+		SuccessThreshold:    1,
+		TimeoutSeconds:      1,
 	}
 	container.VolumeMounts = []corev1.VolumeMount{
 		{
@@ -140,6 +144,7 @@ func createUploadProxyDeployment(image, verbosity, pullPolicy string) *appsv1.De
 							Path: "tls.key",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},
@@ -158,6 +163,7 @@ func createUploadProxyDeployment(image, verbosity, pullPolicy string) *appsv1.De
 							Path: "tls.key",
 						},
 					},
+					DefaultMode: &defaultMode,
 				},
 			},
 		},

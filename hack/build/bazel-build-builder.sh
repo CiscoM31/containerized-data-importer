@@ -15,7 +15,7 @@
 #limitations under the License.
 
 set -e
-script_dir="$(readlink -f $(dirname $0))"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 source "${script_dir}"/common.sh
 source "${script_dir}"/config.sh
 
@@ -23,7 +23,7 @@ BUILDER_SPEC="${BUILD_DIR}/docker/builder"
 
 # When building and pushing a new image we do not provide the sha hash
 # because docker assigns that for us.
-UNTAGGED_BUILDER_IMAGE=$(expr match $BUILDER_IMAGE '\(.*\)@sha256')
+UNTAGGED_BUILDER_IMAGE=kubevirt/kubevirt-cdi-bazel-builder
 
 # Build the encapsulated compile and test container
 (cd ${BUILDER_SPEC} && docker build --tag ${UNTAGGED_BUILDER_IMAGE}:${BUILDER_TAG} .)

@@ -30,6 +30,7 @@ import (
 	"k8s.io/klog"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
@@ -262,5 +263,7 @@ func (fr *FormatReaders) Close() (rtnerr error) {
 
 // StartProgressUpdate starts the go routine to automatically update the progress on a set interval.
 func (fr *FormatReaders) StartProgressUpdate() {
-	fr.progressReader.StartTimedUpdate()
+	if fr.progressReader != nil {
+		fr.progressReader.StartTimedUpdate()
+	}
 }

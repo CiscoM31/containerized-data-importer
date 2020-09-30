@@ -1,27 +1,31 @@
 package uploadproxy
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"regexp"
 	"strconv"
 	"time"
 
-	"k8s.io/apimachinery/pkg/util/wait"
-
 	"github.com/pkg/errors"
+	"github.com/rs/cors"
 	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/pkg/token"
+	"kubevirt.io/containerized-data-importer/pkg/uploadserver"
 	"kubevirt.io/containerized-data-importer/pkg/util/cert/fetcher"
 )
 
@@ -52,6 +56,7 @@ type ClientCreator interface {
 }
 
 type urlLookupFunc func(string, string, string) string
+type uploadPossibleFunc func(*v1.PersistentVolumeClaim) error
 
 type uploadProxyApp struct {
 	bindAddress string
@@ -65,10 +70,11 @@ type uploadProxyApp struct {
 
 	tokenValidator token.Validator
 
-	mux *http.ServeMux
+	handler http.Handler
 
-	// test hook
-	urlResolver urlLookupFunc
+	// test hooks
+	urlResolver    urlLookupFunc
+	uploadPossible uploadPossibleFunc
 }
 
 type clientCreator struct {
@@ -88,12 +94,13 @@ func NewUploadProxy(bindAddress string,
 	client kubernetes.Interface) (Server, error) {
 	var err error
 	app := &uploadProxyApp{
-		bindAddress:   bindAddress,
-		bindPort:      bindPort,
-		certWatcher:   certWatcher,
-		clientCreator: &clientCreator{certFetcher: clientCertFetcher, bundleFetcher: serverCAFetcher},
-		client:        client,
-		urlResolver:   controller.GetUploadServerURL,
+		bindAddress:    bindAddress,
+		bindPort:       bindPort,
+		certWatcher:    certWatcher,
+		clientCreator:  &clientCreator{certFetcher: clientCertFetcher, bundleFetcher: serverCAFetcher},
+		client:         client,
+		urlResolver:    controller.GetUploadServerURL,
+		uploadPossible: controller.UploadPossibleForPVC,
 	}
 	// retrieve RSA key used by apiserver to sign tokens
 	err = app.getSigningKey(apiServerPublicKey)
@@ -101,7 +108,7 @@ func NewUploadProxy(bindAddress string,
 		return nil, errors.Errorf("unable to retrieve apiserver signing key: %v", errors.WithStack(err))
 	}
 
-	app.initHandlers()
+	app.initHandler()
 
 	return app, nil
 }
@@ -142,15 +149,17 @@ func (c *clientCreator) CreateClient() (*http.Client, error) {
 	return &http.Client{Transport: transport, Timeout: proxyRequestTimeout}, nil
 }
 
-func (app *uploadProxyApp) initHandlers() {
-	app.mux = http.NewServeMux()
-	app.mux.HandleFunc(healthzPath, app.handleHealthzRequest)
-	app.mux.HandleFunc(common.UploadPathSync, app.handleUploadRequest)
-	app.mux.HandleFunc(common.UploadPathAsync, app.handleUploadRequest)
+func (app *uploadProxyApp) initHandler() {
+	mux := http.NewServeMux()
+	mux.HandleFunc(healthzPath, app.handleHealthzRequest)
+	for _, path := range uploadserver.ProxyPaths {
+		mux.HandleFunc(path, app.handleUploadRequest)
+	}
+	app.handler = cors.AllowAll().Handler(mux)
 }
 
 func (app *uploadProxyApp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	app.mux.ServeHTTP(w, r)
+	app.handler.ServeHTTP(w, r)
 }
 
 func (app *uploadProxyApp) handleHealthzRequest(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +200,8 @@ func (app *uploadProxyApp) handleUploadRequest(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		klog.Error(err)
 		w.WriteHeader(http.StatusServiceUnavailable)
+		// Return the error to the caller in the body.
+		w.Write([]byte(err.Error()))
 		return
 	}
 
@@ -199,7 +210,7 @@ func (app *uploadProxyApp) handleUploadRequest(w http.ResponseWriter, r *http.Re
 
 func (app *uploadProxyApp) uploadReady(pvcName, pvcNamespace string) error {
 	return wait.PollImmediate(waitReadyImterval, waitReadyTime, func() (bool, error) {
-		pvc, err := app.client.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(pvcName, metav1.GetOptions{})
+		pvc, err := app.client.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(context.TODO(), pvcName, metav1.GetOptions{})
 		if err != nil {
 			if k8serrors.IsNotFound(err) {
 				return false, fmt.Errorf("rejecting Upload Request for PVC %s that doesn't exist", pvcName)
@@ -208,6 +219,10 @@ func (app *uploadProxyApp) uploadReady(pvcName, pvcNamespace string) error {
 			return false, err
 		}
 
+		err = app.uploadPossible(pvc)
+		if err != nil {
+			return false, err
+		}
 		phase := v1.PodPhase(pvc.Annotations[controller.AnnPodPhase])
 		if phase == v1.PodSucceeded {
 			return false, fmt.Errorf("rejecting Upload Request for PVC %s that already finished uploading", pvcName)
@@ -219,32 +234,25 @@ func (app *uploadProxyApp) uploadReady(pvcName, pvcNamespace string) error {
 }
 
 func (app *uploadProxyApp) proxyUploadRequest(namespace, pvc string, w http.ResponseWriter, r *http.Request) {
-	url := app.urlResolver(namespace, pvc, r.URL.Path)
-
-	req, _ := http.NewRequest(r.Method, url, r.Body)
-	req.ContentLength = r.ContentLength
-
-	klog.V(3).Infof("Method: %s to: %s", r.Method, url)
-
 	client, err := app.clientCreator.CreateClient()
 	if err != nil {
 		klog.Error("Error creating http client")
-	}
-
-	response, err := client.Do(req)
-	if err != nil {
-		klog.Errorf("Error proxying %s", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	klog.V(3).Infof("Response status for url %s: %d", url, response.StatusCode)
-
-	w.WriteHeader(response.StatusCode)
-	_, err = io.Copy(w, response.Body)
-	if err != nil {
-		klog.Warningf("Error proxying response from url %s", url)
+	p := &httputil.ReverseProxy{
+		Director: func(req *http.Request) {
+			req.URL, _ = url.Parse(app.urlResolver(namespace, pvc, r.URL.Path))
+			if _, ok := req.Header["User-Agent"]; !ok {
+				// explicitly disable User-Agent so it's not set to default value
+				req.Header.Set("User-Agent", "")
+			}
+		},
+		Transport: client.Transport,
 	}
+
+	p.ServeHTTP(w, r)
 }
 
 func (app *uploadProxyApp) getSigningKey(publicKeyPEM string) error {

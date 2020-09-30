@@ -4,29 +4,26 @@ import (
 	"context"
 	"crypto/rsa"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
-	crdv1alpha1 "github.com/kubernetes-csi/external-snapshotter/pkg/apis/volumesnapshot/v1alpha1"
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+
+	"github.com/go-logr/logr"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	"github.com/pkg/errors"
 	v1 "k8s.io/api/core/v1"
 	extclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
-	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	clientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
-	"kubevirt.io/containerized-data-importer/pkg/util"
 	"kubevirt.io/containerized-data-importer/pkg/util/cert"
+	"kubevirt.io/containerized-data-importer/pkg/util/naming"
 )
 
 const (
@@ -43,16 +40,6 @@ const (
 	ImagePathName  = "image-path"
 	socketPathName = "socket-path"
 
-	// SourceHTTP is the source type HTTP, if unspecified or invalid, it defaults to SourceHTTP
-	SourceHTTP = "http"
-	// SourceS3 is the source type S3
-	SourceS3 = "s3"
-	// SourceGlance is the source type of glance
-	SourceGlance = "glance"
-	// SourceNone means there is no source.
-	SourceNone = "none"
-	// SourceRegistry is the source type of Registry
-	SourceRegistry = "registry"
 	// AnnAPIGroup is the APIGroup for CDI
 	AnnAPIGroup = "cdi.kubevirt.io"
 	// AnnCreatedBy is a pod annotation indicating if the pod was created by the PVC
@@ -63,43 +50,89 @@ const (
 	AnnPodReady = AnnAPIGroup + "/storage.pod.ready"
 	// AnnOwnerRef is used when owner is in a different namespace
 	AnnOwnerRef = AnnAPIGroup + "/storage.ownerRef"
-	// SourceImageio is the source type ovirt-imageio
-	SourceImageio = "imageio"
+	// AnnPodRestarts is a PVC annotation that tells how many times a related pod was restarted
+	AnnPodRestarts = AnnAPIGroup + "/storage.pod.restarts"
+	// AnnPopulatedFor is a PVC annotation telling the datavolume controller that the PVC is already populated
+	AnnPopulatedFor = AnnAPIGroup + "/storage.populatedFor"
+	// AnnPrePopulated is a PVC annotation telling the datavolume controller that the PVC is already populated
+	AnnPrePopulated = AnnAPIGroup + "/storage.prePopulated"
+
+	// AnnRunningCondition provides a const for the running condition
+	AnnRunningCondition = AnnAPIGroup + "/storage.condition.running"
+	// AnnRunningConditionMessage provides a const for the running condition
+	AnnRunningConditionMessage = AnnAPIGroup + "/storage.condition.running.message"
+	// AnnRunningConditionReason provides a const for the running condition
+	AnnRunningConditionReason = AnnAPIGroup + "/storage.condition.running.reason"
+
+	// AnnBoundCondition provides a const for the running condition
+	AnnBoundCondition = AnnAPIGroup + "/storage.condition.bound"
+	// AnnBoundConditionMessage provides a const for the running condition
+	AnnBoundConditionMessage = AnnAPIGroup + "/storage.condition.bound.message"
+	// AnnBoundConditionReason provides a const for the running condition
+	AnnBoundConditionReason = AnnAPIGroup + "/storage.condition.bound.reason"
+
+	// AnnSourceRunningCondition provides a const for the running condition
+	AnnSourceRunningCondition = AnnAPIGroup + "/storage.condition.source.running"
+	// AnnSourceRunningConditionMessage provides a const for the running condition
+	AnnSourceRunningConditionMessage = AnnAPIGroup + "/storage.condition.source.running.message"
+	// AnnSourceRunningConditionReason provides a const for the running condition
+	AnnSourceRunningConditionReason = AnnAPIGroup + "/storage.condition.source.running.reason"
+
+	// PodRunningReason is const that defines the pod was started as a reason
+	podRunningReason = "Pod is running"
 )
 
-type podDeleteRequest struct {
-	namespace string
-	podName   string
-	podLister corelisters.PodLister
-	k8sClient kubernetes.Interface
-}
-
-func checkPVC(pvc *v1.PersistentVolumeClaim, annotation string) bool {
+func checkPVC(pvc *v1.PersistentVolumeClaim, annotation string, log logr.Logger) bool {
 	// check if we have proper annotation
 	if !metav1.HasAnnotation(pvc.ObjectMeta, annotation) {
-		klog.V(2).Infof("pvc annotation %q not found, skipping pvc \"%s/%s\"\n", annotation, pvc.Namespace, pvc.Name)
+		log.V(1).Info("PVC annotation not found, skipping pvc", "annotation", annotation)
 		return false
 	}
 
 	return true
 }
 
-// returns the endpoint string which contains the full path URI of the target object to be copied.
-func getEndpoint(pvc *v1.PersistentVolumeClaim) (string, error) {
-	ep, found := pvc.Annotations[AnnEndpoint]
-	if !found || ep == "" {
-		verb := "empty"
-		if !found {
-			verb = "missing"
-		}
-		return ep, errors.Errorf("annotation %q in pvc \"%s/%s\" is %s\n", AnnEndpoint, pvc.Namespace, pvc.Name, verb)
+// - when the SkipWFFCVolumesEnabled is true, the CDI controller will only handle BOUND the PVC
+// - when the SkipWFFCVolumesEnabled is false, the CDI controller will can handle it - it will create worker pods for the PVC (this will bind it)
+func shouldHandlePvc(pvc *v1.PersistentVolumeClaim, honorWaitForFirstConsumerEnabled bool, log logr.Logger) bool {
+	if honorWaitForFirstConsumerEnabled {
+		return isBound(pvc, log)
 	}
-	return ep, nil
+	return true
 }
 
-func getDiskID(pvc *v1.PersistentVolumeClaim) string {
-	diskID, _ := pvc.Annotations[AnnDiskID]
-	return diskID
+func isBound(pvc *v1.PersistentVolumeClaim, log logr.Logger) bool {
+	if pvc.Status.Phase != v1.ClaimBound {
+		log.V(1).Info("PVC not bound, skipping pvc", "Phase", pvc.Status.Phase)
+		return false
+	}
+
+	return true
+}
+
+func isPvcUsedByAnyPod(c client.Client, pvc *v1.PersistentVolumeClaim, log logr.Logger) (bool, error) {
+	pods := &v1.PodList{}
+	if err := c.List(context.TODO(), pods, &client.ListOptions{Namespace: pvc.Namespace}); err != nil {
+		return false, errors.Wrap(err, "error listing pods")
+	}
+
+	for _, pod := range pods.Items {
+		if isPvcUsedByPod(pod, pvc.Name) {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func isPvcUsedByPod(pod v1.Pod, pvcName string) bool {
+	for _, volume := range pod.Spec.Volumes {
+		if volume.VolumeSource.PersistentVolumeClaim != nil &&
+			volume.PersistentVolumeClaim.ClaimName == pvcName {
+			return true
+		}
+	}
+	return false
 }
 
 func getRequestedImageSize(pvc *v1.PersistentVolumeClaim) (string, error) {
@@ -110,133 +143,12 @@ func getRequestedImageSize(pvc *v1.PersistentVolumeClaim) (string, error) {
 	return pvcSize.String(), nil
 }
 
-// returns the source string which determines the type of source. If no source or invalid source found, default to http
-func getSource(pvc *v1.PersistentVolumeClaim) string {
-	source, found := pvc.Annotations[AnnSource]
-	if !found {
-		source = ""
-	}
-	switch source {
-	case
-		SourceHTTP,
-		SourceS3,
-		SourceGlance,
-		SourceNone,
-		SourceRegistry,
-		SourceImageio:
-		klog.V(2).Infof("pvc source annotation found for pvc \"%s/%s\", value %s\n", pvc.Namespace, pvc.Name, source)
-	default:
-		klog.V(2).Infof("No valid source annotation found for pvc \"%s/%s\", default to http\n", pvc.Namespace, pvc.Name)
-		source = SourceHTTP
-	}
-	return source
-}
-
-// returns the source string which determines the type of source. If no source or invalid source found, default to http
-func getContentType(pvc *v1.PersistentVolumeClaim) string {
-	contentType, found := pvc.Annotations[AnnContentType]
-	if !found {
-		contentType = ""
-	}
-	switch contentType {
-	case
-		string(cdiv1.DataVolumeKubeVirt),
-		string(cdiv1.DataVolumeArchive):
-		klog.V(2).Infof("pvc content type annotation found for pvc \"%s/%s\", value %s\n", pvc.Namespace, pvc.Name, contentType)
-	default:
-		klog.V(2).Infof("No content type annotation found for pvc \"%s/%s\", default to kubevirt\n", pvc.Namespace, pvc.Name)
-		contentType = string(cdiv1.DataVolumeKubeVirt)
-	}
-	return contentType
-}
-
 // returns the volumeMode which determines if the PVC is block PVC or not.
 func getVolumeMode(pvc *v1.PersistentVolumeClaim) v1.PersistentVolumeMode {
 	if pvc.Spec.VolumeMode != nil {
 		return *pvc.Spec.VolumeMode
 	}
 	return v1.PersistentVolumeFilesystem
-}
-
-// returns the name of the secret containing endpoint credentials consumed by the importer pod.
-// A value of "" implies there are no credentials for the endpoint being used. A returned error
-// causes processNextItem() to stop.
-func getSecretName(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim) (string, error) {
-	ns := pvc.Namespace
-	name, found := pvc.Annotations[AnnSecret]
-	if !found || name == "" {
-		msg := "getEndpointSecret: "
-		if !found {
-			msg += "annotation %q is missing in pvc \"%s/%s\""
-		} else {
-			msg += "secret name is missing from annotation %q in pvc \"%s/%s\""
-		}
-		klog.V(2).Infof(msg+"\n", AnnSecret, ns, pvc.Name)
-		return "", nil // importer pod will not contain secret credentials
-	}
-	return name, nil
-}
-
-// Update and return a copy of the passed-in pvc. Only one of the annotation or label maps is required though
-// both can be passed.
-// Note: the only pvc changes supported are annotations and labels.
-func updatePVC(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim, anno, label map[string]string) (*v1.PersistentVolumeClaim, error) {
-	klog.V(3).Infof("updatePVC: updating pvc \"%s/%s\" with anno: %+v and label: %+v", pvc.Namespace, pvc.Name, anno, label)
-	applyUpdt := func(claim *v1.PersistentVolumeClaim, a, l map[string]string) {
-		if a != nil {
-			claim.ObjectMeta.Annotations = addToMap(claim.ObjectMeta.Annotations, a)
-		}
-		if l != nil {
-			claim.ObjectMeta.Labels = addToMap(claim.ObjectMeta.Labels, l)
-		}
-	}
-
-	var updtPvc *v1.PersistentVolumeClaim
-	nsName := fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name)
-	// don't mutate the passed-in pvc since it's likely from the shared informer
-	pvcCopy := pvc.DeepCopy()
-
-	// loop a few times in case the pvc is stale
-	err := wait.PollImmediate(time.Second*1, time.Second*10, func() (bool, error) {
-		var e error
-		applyUpdt(pvcCopy, anno, label)
-		updtPvc, e = client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvcCopy)
-		if e == nil {
-			return true, nil // successful update
-		}
-		if k8serrors.IsConflict(e) { // pvc is likely stale
-			klog.V(3).Infof("pvc %q is stale, re-trying\n", nsName)
-			pvcCopy, e = client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(pvc.Name, metav1.GetOptions{})
-			if e == nil {
-				return false, nil // retry update
-			}
-			// Get failed, start over
-			pvcCopy = pvc.DeepCopy()
-		}
-		klog.Errorf("%q update/get error: %v\n", nsName, e)
-		return false, nil // retry
-	})
-
-	if err == nil {
-		klog.V(3).Infof("updatePVC: pvc %q updated", nsName)
-		return updtPvc, nil
-	}
-	return pvc, errors.Wrapf(err, "error updating pvc %q\n", nsName)
-}
-
-// Sets an annotation `key: val` in the given pvc. Returns the updated pvc.
-func setPVCAnnotation(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim, key, val string) (*v1.PersistentVolumeClaim, error) {
-	klog.V(3).Infof("setPVCAnnotation: adding annotation \"%s: %s\" to pvc \"%s/%s\"\n", key, val, pvc.Namespace, pvc.Name)
-	return updatePVC(client, pvc, map[string]string{key: val}, nil)
-}
-
-// checks if annotation `key` has a value of `val`.
-func checkIfAnnoExists(pvc *v1.PersistentVolumeClaim, key string, val string) bool {
-	value, exists := pvc.ObjectMeta.Annotations[key]
-	if exists && value == val {
-		return true
-	}
-	return false
 }
 
 // checks if particular label exists in pvc
@@ -253,9 +165,7 @@ func checkIfLabelExists(pvc *v1.PersistentVolumeClaim, lbl string, val string) b
 // which allows handleObject to discover the pod resource that 'owns' it, and clean up when needed.
 func newScratchPersistentVolumeClaimSpec(pvc *v1.PersistentVolumeClaim, pod *v1.Pod, name, storageClassName string) *v1.PersistentVolumeClaim {
 	labels := map[string]string{
-		"cdi-controller": pod.Name,
-		"app":            "containerized-data-importer",
-		LabelImportPvc:   pvc.Name,
+		"app": "containerized-data-importer",
 	}
 
 	annotations := make(map[string]string, 0)
@@ -290,12 +200,16 @@ func newScratchPersistentVolumeClaimSpec(pvc *v1.PersistentVolumeClaim, pod *v1.
 }
 
 // CreateScratchPersistentVolumeClaim creates and returns a pointer to a scratch PVC which is created based on the passed-in pvc and storage class name.
-func CreateScratchPersistentVolumeClaim(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim, pod *v1.Pod, name, storageClassName string) (*v1.PersistentVolumeClaim, error) {
-	ns := pvc.Namespace
+func CreateScratchPersistentVolumeClaim(client client.Client, pvc *v1.PersistentVolumeClaim, pod *v1.Pod, name, storageClassName string) (*v1.PersistentVolumeClaim, error) {
 	scratchPvcSpec := newScratchPersistentVolumeClaimSpec(pvc, pod, name, storageClassName)
-	scratchPvc, err := client.CoreV1().PersistentVolumeClaims(ns).Create(scratchPvcSpec)
-	if err != nil {
-		return nil, errors.Wrap(err, "scratch PVC API create errored")
+	if err := client.Create(context.TODO(), scratchPvcSpec); err != nil {
+		if !k8serrors.IsAlreadyExists(err) {
+			return nil, errors.Wrap(err, "scratch PVC API create errored")
+		}
+	}
+	scratchPvc := &v1.PersistentVolumeClaim{}
+	if err := client.Get(context.TODO(), types.NamespacedName{Name: scratchPvcSpec.Name, Namespace: pvc.Namespace}, scratchPvc); err != nil {
+		klog.Errorf("Unable to get scratch space pvc, %v\n", err)
 	}
 	klog.V(3).Infof("scratch PVC \"%s/%s\" created\n", scratchPvc.Namespace, scratchPvc.Name)
 	return scratchPvc, nil
@@ -306,10 +220,10 @@ func CreateScratchPersistentVolumeClaim(client kubernetes.Interface, pvc *v1.Per
 // 1. Defined value in CDI Config field scratchSpaceStorageClass.
 // 2. If 1 is not available, use the storage class name of the original pvc that will own the scratch pvc.
 // 3. If none of those are available, return blank.
-func GetScratchPvcStorageClass(client kubernetes.Interface, cdiclient clientset.Interface, pvc *v1.PersistentVolumeClaim) string {
-	config, err := cdiclient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
-	if err != nil {
-		klog.Errorf("Unable to find CDI configuration, %v\n", err)
+func GetScratchPvcStorageClass(client client.Client, pvc *v1.PersistentVolumeClaim) string {
+	config := &cdiv1.CDIConfig{}
+	if err := client.Get(context.TODO(), types.NamespacedName{Name: common.ConfigName}, config); err != nil {
+		return ""
 	}
 	storageClassName := config.Status.ScratchSpaceStorageClass
 	if storageClassName == "" {
@@ -407,170 +321,31 @@ func MakePodOwnerReference(pod *v1.Pod) metav1.OwnerReference {
 	}
 }
 
-func deletePod(req podDeleteRequest) error {
-	pod, err := req.podLister.Pods(req.namespace).Get(req.podName)
-	if k8serrors.IsNotFound(err) {
-		return nil
-	}
-	if err == nil && pod.DeletionTimestamp == nil {
-		err = req.k8sClient.CoreV1().Pods(req.namespace).Delete(req.podName, &metav1.DeleteOptions{})
-		if k8serrors.IsNotFound(err) {
-			return nil
-		}
-	}
-	if err != nil {
-		klog.V(1).Infof("error encountered deleting pod (%s): %s", req.podName, err.Error())
-	}
-	return errors.Wrapf(err, "error deleting pod %s/%s", req.namespace, req.podName)
+// IsCsiCrdsDeployed checks whether the CSI snapshotter CRD are deployed
+func IsCsiCrdsDeployed(c extclientset.Interface) bool {
+	version := "v1beta1"
+	vsClass := "volumesnapshotclasses." + snapshotv1.GroupName
+	vsContent := "volumesnapshotcontents." + snapshotv1.GroupName
+	vs := "volumesnapshots." + snapshotv1.GroupName
+
+	return isCrdDeployed(c, vsClass, version) &&
+		isCrdDeployed(c, vsContent, version) &&
+		isCrdDeployed(c, vs, version)
 }
 
-func createImportEnvVar(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim) (*importPodEnvVar, error) {
-	podEnvVar := &importPodEnvVar{}
-	podEnvVar.source = getSource(pvc)
-	podEnvVar.contentType = getContentType(pvc)
-
-	var err error
-	if podEnvVar.source != SourceNone {
-		podEnvVar.ep, err = getEndpoint(pvc)
-		if err != nil {
-			return nil, err
-		}
-		podEnvVar.secretName, err = getSecretName(client, pvc)
-		if err != nil {
-			return nil, err
-		}
-		if podEnvVar.secretName == "" {
-			klog.V(2).Infof("no secret will be supplied to endpoint %q\n", podEnvVar.ep)
-		}
-		podEnvVar.certConfigMap, err = getCertConfigMap(client, pvc)
-		if err != nil {
-			return nil, err
-		}
-		podEnvVar.insecureTLS, err = isInsecureTLS(client, pvc)
-		if err != nil {
-			return nil, err
-		}
-		podEnvVar.diskID = getDiskID(pvc)
-	}
-	//get the requested image size.
-	podEnvVar.imageSize, err = getRequestedImageSize(pvc)
+func isCrdDeployed(c extclientset.Interface, name, version string) bool {
+	obj, err := c.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), name, metav1.GetOptions{})
 	if err != nil {
-		return nil, err
-	}
-	return podEnvVar, nil
-}
-
-func getCertConfigMap(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim) (string, error) {
-	value, ok := pvc.Annotations[AnnCertConfigMap]
-	if !ok || value == "" {
-		return "", nil
+		return false
 	}
 
-	_, err := client.CoreV1().ConfigMaps(pvc.Namespace).Get(value, metav1.GetOptions{})
-	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			klog.Warningf("Configmap %s does not exist, pod will not start until it does", value)
-			return value, nil
-		}
-
-		return "", err
-	}
-
-	return value, nil
-}
-
-//IsOpenshift checks if we are on OpenShift platform
-func IsOpenshift(client kubernetes.Interface) bool {
-	//OpenShift 3.X check
-	result := client.Discovery().RESTClient().Get().AbsPath("/oapi/v1").Do()
-	var statusCode int
-	result.StatusCode(&statusCode)
-
-	if result.Error() == nil {
-		// It is OpenShift
-		if statusCode == http.StatusOK {
+	for _, v := range obj.Spec.Versions {
+		if v.Name == version && v.Served {
 			return true
-		}
-	} else {
-		// Got 404 so this is not Openshift 3.X, let's check OpenShift 4
-		result = client.Discovery().RESTClient().Get().AbsPath("/apis/route.openshift.io").Do()
-		var statusCode int
-		result.StatusCode(&statusCode)
-
-		if result.Error() == nil {
-			// It is OpenShift
-			if statusCode == http.StatusOK {
-				return true
-			}
 		}
 	}
 
 	return false
-}
-
-func isInsecureTLS(client kubernetes.Interface, pvc *v1.PersistentVolumeClaim) (bool, error) {
-	var configMapName string
-
-	value, ok := pvc.Annotations[AnnEndpoint]
-	if !ok || value == "" {
-		return false, nil
-	}
-
-	url, err := url.Parse(value)
-	if err != nil {
-		return false, err
-	}
-
-	switch url.Scheme {
-	case "docker":
-		configMapName = common.InsecureRegistryConfigMap
-	default:
-		return false, nil
-	}
-
-	klog.V(3).Infof("Checking configmap %s for host %s", configMapName, url.Host)
-
-	cm, err := client.CoreV1().ConfigMaps(util.GetNamespace()).Get(configMapName, metav1.GetOptions{})
-	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			klog.Warningf("Configmap %s does not exist", configMapName)
-			return false, nil
-		}
-
-		return false, err
-	}
-
-	for key, value := range cm.Data {
-		klog.V(3).Infof("Checking %q against %q: %q", url.Host, key, value)
-
-		if value == url.Host {
-			return true, nil
-		}
-	}
-
-	return false, nil
-}
-
-// IsCsiCrdsDeployed checks whether the CSI snapshotter CRD are deployed
-func IsCsiCrdsDeployed(c extclientset.Interface) bool {
-	vsClass := crdv1alpha1.VolumeSnapshotClassResourcePlural + "." + crdv1alpha1.GroupName
-	vsContent := crdv1alpha1.VolumeSnapshotContentResourcePlural + "." + crdv1alpha1.GroupName
-	vs := crdv1alpha1.VolumeSnapshotResourcePlural + "." + crdv1alpha1.GroupName
-
-	return isCrdDeployed(c, vsClass) &&
-		isCrdDeployed(c, vsContent) &&
-		isCrdDeployed(c, vs)
-}
-
-func isCrdDeployed(c extclientset.Interface, name string) bool {
-	obj, err := c.ApiextensionsV1beta1().CustomResourceDefinitions().Get(name, metav1.GetOptions{})
-	if err != nil {
-		if k8serrors.IsNotFound(err) {
-			return false
-		}
-		return false
-	}
-	return obj != nil
 }
 
 func isPodReady(pod *v1.Pod) bool {
@@ -595,4 +370,114 @@ func podPhaseFromPVC(pvc *v1.PersistentVolumeClaim) v1.PodPhase {
 
 func podSucceededFromPVC(pvc *v1.PersistentVolumeClaim) bool {
 	return (podPhaseFromPVC(pvc) == v1.PodSucceeded)
+}
+
+func setConditionFromPodWithPrefix(anno map[string]string, prefix string, pod *v1.Pod) {
+	if pod.Status.ContainerStatuses != nil {
+		if pod.Status.ContainerStatuses[0].State.Running != nil {
+			anno[prefix] = "true"
+			anno[prefix+".message"] = ""
+			anno[prefix+".reason"] = podRunningReason
+		} else {
+			anno[AnnRunningCondition] = "false"
+			if pod.Status.ContainerStatuses[0].State.Waiting != nil {
+				anno[prefix+".message"] = pod.Status.ContainerStatuses[0].State.Waiting.Message
+				anno[prefix+".reason"] = pod.Status.ContainerStatuses[0].State.Waiting.Reason
+			} else if pod.Status.ContainerStatuses[0].State.Terminated != nil {
+				anno[prefix+".message"] = pod.Status.ContainerStatuses[0].State.Terminated.Message
+				anno[prefix+".reason"] = pod.Status.ContainerStatuses[0].State.Terminated.Reason
+			}
+		}
+	}
+}
+
+func setBoundConditionFromPVC(anno map[string]string, prefix string, pvc *v1.PersistentVolumeClaim) {
+	switch pvc.Status.Phase {
+	case v1.ClaimBound:
+		anno[prefix] = "true"
+		anno[prefix+".message"] = ""
+		anno[prefix+".reason"] = ""
+	case v1.ClaimPending:
+		anno[prefix] = "false"
+		anno[prefix+".message"] = "Claim Pending"
+		anno[prefix+".reason"] = "Claim Pending"
+	case v1.ClaimLost:
+		anno[prefix] = "false"
+		anno[prefix+".message"] = claimLost
+		anno[prefix+".reason"] = claimLost
+	default:
+		anno[prefix] = "false"
+		anno[prefix+".message"] = "Unknown"
+		anno[prefix+".reason"] = "Unknown"
+	}
+}
+
+func getScratchNameFromPod(pod *v1.Pod) (string, bool) {
+	for _, vol := range pod.Spec.Volumes {
+		if vol.Name == ScratchVolName {
+			return vol.PersistentVolumeClaim.ClaimName, true
+		}
+	}
+
+	return "", false
+}
+
+func createScratchNameFromPvc(pvc *v1.PersistentVolumeClaim) string {
+	return naming.GetResourceName(pvc.Name, common.ScratchNameSuffix)
+}
+
+func getPodsUsingPVCs(c client.Client, namespace string, names sets.String, allowReadOnly bool) ([]v1.Pod, error) {
+	pl := &v1.PodList{}
+	// hopefully using cached client here
+	err := c.List(context.TODO(), pl, &client.ListOptions{Namespace: namespace})
+	if err != nil {
+		return nil, err
+	}
+
+	var pods []v1.Pod
+	for _, pod := range pl.Items {
+		for _, volume := range pod.Spec.Volumes {
+			if volume.VolumeSource.PersistentVolumeClaim != nil &&
+				names.Has(volume.PersistentVolumeClaim.ClaimName) &&
+				(!allowReadOnly || !volume.PersistentVolumeClaim.ReadOnly) {
+				pods = append(pods, pod)
+				break
+			}
+		}
+	}
+
+	return pods, nil
+}
+
+func filterCloneSourcePods(input []v1.Pod) []v1.Pod {
+	var output []v1.Pod
+
+	for _, pod := range input {
+		if pod.Labels[common.CDIComponentLabel] != common.ClonerSourcePodName {
+			output = append(output, pod)
+		}
+	}
+
+	return output
+}
+
+// GetWorkloadNodePlacement extracts the workload-specific nodeplacement values from the CDI CR
+func GetWorkloadNodePlacement(c client.Client) (*sdkapi.NodePlacement, error) {
+	crList := &cdiv1.CDIList{}
+	if err := c.List(context.TODO(), crList, &client.ListOptions{}); err != nil {
+		return nil, err
+	}
+	if len(crList.Items) != 1 {
+		return nil, fmt.Errorf("Number of CDI CRs != 1")
+	}
+	return &crList.Items[0].Spec.Workloads, nil
+}
+
+// IsPopulated returns if the passed in PVC has been populated according to the rules outlined in pkg/apis/core/<version>/utils.go
+func IsPopulated(pvc *v1.PersistentVolumeClaim, c client.Client) (bool, error) {
+	return cdiv1.IsPopulated(pvc, func(name, namespace string) (*cdiv1.DataVolume, error) {
+		dv := &cdiv1.DataVolume{}
+		err := c.Get(context.TODO(), types.NamespacedName{Name: name, Namespace: namespace}, dv)
+		return dv, err
+	})
 }

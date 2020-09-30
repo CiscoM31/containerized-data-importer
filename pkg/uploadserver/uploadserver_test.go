@@ -20,18 +20,22 @@
 package uploadserver
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"testing"
 	"time"
 
-	"kubevirt.io/containerized-data-importer/pkg/common"
+	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/extensions/table"
+	. "github.com/onsi/gomega"
+
 	"kubevirt.io/containerized-data-importer/pkg/importer"
 	"kubevirt.io/containerized-data-importer/pkg/util/cert"
 	"kubevirt.io/containerized-data-importer/pkg/util/cert/triple"
@@ -42,21 +46,15 @@ func newServer() *uploadServerApp {
 	return server.(*uploadServerApp)
 }
 
-func newTLSServer(t *testing.T, clientCertName, expectedName string) (*uploadServerApp, *triple.KeyPair, *x509.Certificate) {
+func newTLSServer(clientCertName, expectedName string) (*uploadServerApp, *triple.KeyPair, *x509.Certificate) {
 	serverCA, err := triple.NewCA("server")
-	if err != nil {
-		t.Error("Error creating CA")
-	}
+	Expect(err).ToNot(HaveOccurred())
 
 	clientCA, err := triple.NewCA("client")
-	if err != nil {
-		t.Error("Error creating CA")
-	}
+	Expect(err).ToNot(HaveOccurred())
 
 	serverKeyPair, err := triple.NewServerKeyPair(serverCA, "localhost", "localhost", "default", "local", []string{"127.0.0.1"}, []string{"localhost"})
-	if err != nil {
-		t.Error("Error creating server cert")
-	}
+	Expect(err).ToNot(HaveOccurred())
 
 	tlsKey := string(cert.EncodePrivateKeyPEM(serverKeyPair.Key))
 	tlsCert := string(cert.EncodeCertPEM(serverKeyPair.Cert))
@@ -65,18 +63,14 @@ func newTLSServer(t *testing.T, clientCertName, expectedName string) (*uploadSer
 	server := NewUploadServer("127.0.0.1", 0, "disk.img", tlsKey, tlsCert, clientCert, expectedName, "").(*uploadServerApp)
 
 	clientKeyPair, err := triple.NewClientKeyPair(clientCA, clientCertName, []string{})
-	if err != nil {
-		t.Error("Error creating client cert")
-	}
+	Expect(err).ToNot(HaveOccurred())
 
 	return server, clientKeyPair, serverCA.Cert
 }
 
-func newHTTPClient(t *testing.T, clientKeyPair *triple.KeyPair, serverCACert *x509.Certificate) *http.Client {
+func newHTTPClient(clientKeyPair *triple.KeyPair, serverCACert *x509.Certificate) *http.Client {
 	clientCert, err := tls.X509KeyPair(cert.EncodeCertPEM(clientKeyPair.Cert), cert.EncodePrivateKeyPEM(clientKeyPair.Key))
-	if err != nil {
-		t.Error("Could not create tls.Certificate")
-	}
+	Expect(err).ToNot(HaveOccurred())
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(cert.EncodeCertPEM(serverCACert))
@@ -91,30 +85,6 @@ func newHTTPClient(t *testing.T, clientKeyPair *triple.KeyPair, serverCACert *x5
 	client := &http.Client{Transport: transport}
 
 	return client
-}
-
-func newRequest(t *testing.T) *http.Request {
-	req, err := http.NewRequest("POST", common.UploadPathSync, strings.NewReader("data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return req
-}
-
-func newAsyncRequest(t *testing.T) *http.Request {
-	req, err := http.NewRequest("POST", common.UploadPathAsync, strings.NewReader("data"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return req
-}
-
-func newAsyncHeadRequest(t *testing.T) *http.Request {
-	req, err := http.NewRequest("HEAD", common.UploadPathAsync, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return req
 }
 
 func saveProcessorSuccess(stream io.ReadCloser, dest, imageSize, contentType string) error {
@@ -204,209 +174,168 @@ func replaceAsyncProcessorFunc(replacement func(io.ReadCloser, string, string, s
 	}()
 	f()
 }
-func TestGetFails(t *testing.T) {
-	withProcessorSuccess(func() {
-		req, err := http.NewRequest("GET", common.UploadPathSync, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
 
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusNotFound {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusNotFound)
-		}
-	})
-}
-
-func TestHealthz(t *testing.T) {
-	req, err := http.NewRequest("GET", healthzPath, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-
-	app := uploadServerApp{}
-	server, _ := app.createHealthzServer()
-	server.Handler.ServeHTTP(rr, req)
-
-	if status := rr.Code; status != http.StatusOK {
-		t.Errorf("handler returned wrong status code: got %v want %v",
-			status, http.StatusOK)
-	}
-}
-
-func TestInProcessUnavailable(t *testing.T) {
-	withProcessorSuccess(func() {
-		req := newRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.uploading = true
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusServiceUnavailable {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusServiceUnavailable)
-		}
-	})
-}
-
-func TestInProcessUnavailableAsync(t *testing.T) {
-	withProcessorSuccess(func() {
-		req := newAsyncRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.uploading = true
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusServiceUnavailable {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusServiceUnavailable)
-		}
-	})
-}
-func TestCompletedConflict(t *testing.T) {
-	withProcessorSuccess(func() {
-		req := newRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.done = true
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusConflict {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusConflict)
-		}
-	})
-}
-
-func TestCompletedConflictAsync(t *testing.T) {
-	withProcessorSuccess(func() {
-		req := newAsyncRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.done = true
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusConflict {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusConflict)
-		}
-	})
-}
-func TestSuccess(t *testing.T) {
-	withProcessorSuccess(func() {
-		req := newRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusOK)
-		}
-	})
-}
-
-func TestSuccessAsync(t *testing.T) {
-	withAsyncProcessorSuccess(func() {
-		req := newAsyncRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusOK)
-		}
-	})
-}
-
-func TestSuccessHeadAsync(t *testing.T) {
-	withAsyncProcessorSuccess(func() {
-		req := newAsyncHeadRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusOK {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusOK)
-		}
-	})
-}
-
-func TestStreamFail(t *testing.T) {
-	withProcessorFailure(func() {
-		req := newRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusInternalServerError {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusInternalServerError)
-		}
-	})
-}
-
-func TestStreamFailAsync(t *testing.T) {
-	withAsyncProcessorFailure(func() {
-		req := newAsyncRequest(t)
-
-		rr := httptest.NewRecorder()
-
-		server := newServer()
-		server.ServeHTTP(rr, req)
-
-		if status := rr.Code; status != http.StatusInternalServerError {
-			t.Errorf("handler returned wrong status code: got %v want %v",
-				status, http.StatusInternalServerError)
-		}
-	})
-}
-func TestRealUploadWithClient(t *testing.T) {
-	type testData struct {
-		certName, expectedName string
-		expectedResponse       int
-	}
-	for _, data := range []testData{
-		{
-			certName:         "client",
-			expectedName:     "client",
-			expectedResponse: 200,
-		},
-		{
-			certName:         "foo",
-			expectedName:     "bar",
-			expectedResponse: 401,
-		},
-	} {
+var _ = Describe("Upload server tests", func() {
+	It("GET fails", func() {
 		withProcessorSuccess(func() {
-			server, clientKeyPair, serverCACert := newTLSServer(t, data.certName, data.expectedName)
+			req, err := http.NewRequest("GET", UploadPathSync, nil)
+			Expect(err).ToNot(HaveOccurred())
 
-			client := newHTTPClient(t, clientKeyPair, serverCACert)
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusNotFound))
+		})
+	})
+
+	It("healthz", func() {
+		req, err := http.NewRequest("GET", healthzPath, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		rr := httptest.NewRecorder()
+
+		app := uploadServerApp{}
+		server, _ := app.createHealthzServer()
+		server.Handler.ServeHTTP(rr, req)
+
+		status := rr.Code
+		Expect(status).To(Equal(http.StatusOK))
+
+	})
+
+	table.DescribeTable("Process unavailable", func(uploadPath string) {
+		withProcessorSuccess(func() {
+			req, err := http.NewRequest("POST", UploadPathAsync, strings.NewReader("data"))
+			Expect(err).ToNot(HaveOccurred())
+
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.uploading = true
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusServiceUnavailable))
+		})
+	},
+		table.Entry("async", UploadPathAsync),
+		table.Entry("sync", UploadPathSync),
+		table.Entry("form async", UploadFormAsync),
+		table.Entry("form sync", UploadFormSync),
+	)
+
+	table.DescribeTable("Completion conflict", func(uploadPath string) {
+		withAsyncProcessorSuccess(func() {
+			req, err := http.NewRequest("POST", uploadPath, strings.NewReader("data"))
+			Expect(err).ToNot(HaveOccurred())
+
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.done = true
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusConflict))
+		})
+	},
+		table.Entry("async", UploadPathAsync),
+		table.Entry("sync", UploadPathSync),
+		table.Entry("form async", UploadFormAsync),
+		table.Entry("form sync", UploadFormSync),
+	)
+
+	It("Success", func() {
+		withProcessorSuccess(func() {
+			req, err := http.NewRequest("POST", UploadPathSync, strings.NewReader("data"))
+			Expect(err).ToNot(HaveOccurred())
+
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusOK))
+		})
+	})
+
+	table.DescribeTable("Success, async", func(method string) {
+		withAsyncProcessorSuccess(func() {
+			req, err := http.NewRequest(method, UploadPathAsync, strings.NewReader("data"))
+			Expect(err).ToNot(HaveOccurred())
+
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusOK))
+		})
+	},
+		table.Entry("POST", "POST"),
+		table.Entry("HEAD", "HEAD"),
+	)
+
+	table.DescribeTable("Success, form", func(processorFunc func(func()), path string) {
+		processorFunc(func() {
+			req := newFormRequest(path)
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusOK))
+		})
+	},
+		table.Entry("Sync", withProcessorSuccess, UploadFormSync),
+		table.Entry("Async", withAsyncProcessorSuccess, UploadFormAsync),
+	)
+
+	table.DescribeTable("Stream fail", func(processorFunc func(func()), uploadPath string) {
+		processorFunc(func() {
+			req, err := http.NewRequest("POST", uploadPath, strings.NewReader("data"))
+			Expect(err).ToNot(HaveOccurred())
+
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusInternalServerError))
+		})
+	},
+		table.Entry("async", withAsyncProcessorFailure, UploadPathAsync),
+		table.Entry("sync", withProcessorFailure, UploadPathSync),
+	)
+
+	table.DescribeTable("Stream fail form", func(processorFunc func(func()), uploadPath string) {
+		processorFunc(func() {
+			req := newFormRequest(uploadPath)
+			rr := httptest.NewRecorder()
+
+			server := newServer()
+			server.ServeHTTP(rr, req)
+
+			status := rr.Code
+			Expect(status).To(Equal(http.StatusInternalServerError))
+		})
+	},
+		table.Entry("async", withAsyncProcessorFailure, UploadFormAsync),
+		table.Entry("sync", withProcessorFailure, UploadFormSync),
+	)
+
+	table.DescribeTable("Real upload with client", func(certName string, expectedName string, expectedResponse int) {
+		withProcessorSuccess(func() {
+			server, clientKeyPair, serverCACert := newTLSServer(certName, expectedName)
+
+			client := newHTTPClient(clientKeyPair, serverCACert)
 
 			ch := make(chan struct{})
 
@@ -422,21 +351,14 @@ func TestRealUploadWithClient(t *testing.T) {
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			if server.bindPort == 0 {
-				t.Error("Couldn't start http server")
-			}
+			Expect(server.bindPort).ToNot(Equal(0))
 
-			url := fmt.Sprintf("https://localhost:%d%s", server.bindPort, common.UploadPathSync)
+			url := fmt.Sprintf("https://localhost:%d%s", server.bindPort, UploadPathSync)
 			stringReader := strings.NewReader("nothing")
 
 			resp, err := client.Post(url, "application/x-www-form-urlencoded", stringReader)
-			if err != nil {
-				t.Errorf("Request failed %+v", err)
-			}
-
-			if resp.StatusCode != data.expectedResponse {
-				t.Errorf("Unexpected status code %d wanted %d", resp.StatusCode, data.expectedResponse)
-			}
+			Expect(err).ToNot(HaveOccurred())
+			Expect(resp.StatusCode).To(Equal(expectedResponse))
 
 			if !server.done {
 				close(server.doneChan)
@@ -444,5 +366,29 @@ func TestRealUploadWithClient(t *testing.T) {
 
 			<-ch
 		})
-	}
+	},
+		table.Entry("Valid data", "client", "client", 200),
+		table.Entry("Invalid data", "foo", "bar", 401),
+	)
+})
+
+func newFormRequest(path string) *http.Request {
+	var b bytes.Buffer
+	w := multipart.NewWriter(&b)
+	data := strings.NewReader("data")
+
+	fw, err := w.CreateFormFile("file", "myimage.img")
+	Expect(err).ToNot(HaveOccurred())
+
+	_, err = io.Copy(fw, data)
+	Expect(err).ToNot(HaveOccurred())
+	err = w.Close()
+	Expect(err).ToNot(HaveOccurred())
+
+	req, err := http.NewRequest("POST", path, &b)
+	Expect(err).ToNot(HaveOccurred())
+
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	return req
 }

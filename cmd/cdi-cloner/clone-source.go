@@ -13,7 +13,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/klog"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
+	"kubevirt.io/containerized-data-importer/pkg/util"
 	prometheusutil "kubevirt.io/containerized-data-importer/pkg/util/prometheus"
 )
 
@@ -23,7 +25,7 @@ var (
 )
 
 func init() {
-	flag.StringVar(&contentType, "content_type", "", "archive|kubevirt")
+	flag.StringVar(&contentType, "content_type", "", "archive|kubevirt|filesystem-clone|blockdevice-clone")
 	flag.Uint64Var(&uploadBytes, "upload_bytes", 0, "approx number of bytes in input")
 	klog.InitFlags(nil)
 }
@@ -147,4 +149,9 @@ func main() {
 	klog.V(1).Infof("Response body:\n%s", buf.String())
 
 	klog.V(1).Infoln("clone complete")
+	err = util.WriteTerminationMessage("Clone Complete")
+	if err != nil {
+		klog.Errorf("%+v", err)
+		os.Exit(1)
+	}
 }

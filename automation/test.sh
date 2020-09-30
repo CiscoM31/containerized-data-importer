@@ -29,6 +29,10 @@ export CDI_NAMESPACE=$NAMESPACE
 
 echo "namespace: ${NAMESPACE}, cdi-namespace: ${CDI_NAMESPACE}"
 
+if [[ -n "$RANDOM_CR" ]]; then
+  export CR_NAME="${CDI_NAMESPACE}"
+fi
+
 readonly ARTIFACTS_PATH="${ARTIFACTS}"
 readonly BAZEL_CACHE="${BAZEL_CACHE:-http://bazel-cache.kubevirt-prow.svc.cluster.local:8080/kubevirt.io/containerized-data-importer}"
 
@@ -47,10 +51,11 @@ if [ ! -d "cluster-up/cluster/$KUBEVIRT_PROVIDER" ]; then
 fi
 
 if [[ -n "$MULTI_UPGRADE" ]]; then
-  export UPGRADE_FROM="v1.10.7 v1.10.9 v1.11.0"
+  export UPGRADE_FROM="v1.10.7 v1.11.0 v1.12.0 v1.13.2 v1.14.0 v1.15.0"
 fi
 
-if [[ -z "$UPGRADE_FROM" ]]; then
+# Don't upgrade if we are using a random CR name, otherwise the upgrade will fail
+if [[ -z "$UPGRADE_FROM" ]] && [[ -z "$RANDOM_CR" ]]; then
   export UPGRADE_FROM=$(curl -s https://github.com/kubevirt/containerized-data-importer/releases/latest | grep -o "v[0-9]\.[0-9]*\.[0-9]*")
   echo "Upgrading from verions: $UPGRADE_FROM"
 fi
