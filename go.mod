@@ -20,12 +20,12 @@ require (
 	github.com/kubernetes-csi/external-snapshotter/v2 v2.1.1
 	github.com/onsi/ginkgo v1.12.1
 	github.com/onsi/gomega v1.10.1
-	github.com/openshift/api v0.0.0
-	github.com/openshift/client-go v0.0.0
+	github.com/openshift/api v0.0.0-20200521101457-60c476765272
+	github.com/openshift/client-go v0.0.0-20200521150516-05eb9880269c
 	github.com/openshift/custom-resource-status v0.0.0-20200602122900-c002fd1547ca
 	github.com/openshift/library-go v0.0.0-20200821154433-215f00df72cc
 	github.com/operator-framework/go-appr v0.0.0-20180917210448-f2aef88446f2 // indirect
-	github.com/operator-framework/operator-lifecycle-manager v0.0.0-20190725173916-b56e63a643cc
+	github.com/operator-framework/operator-lifecycle-manager v0.0.0-20190128024246-5eb7ae5bdb7a
 	github.com/operator-framework/operator-marketplace v0.0.0-20190617165322-1cbd32624349
 	github.com/ovirt/go-ovirt v4.3.4+incompatible
 	github.com/pkg/errors v0.9.1
@@ -44,7 +44,7 @@ require (
 	k8s.io/apimachinery v0.19.0-rc.2
 	k8s.io/apiserver v0.19.0-rc.2
 	k8s.io/client-go v8.0.0+incompatible
-	k8s.io/cluster-bootstrap v0.0.0
+	k8s.io/cluster-bootstrap v0.18.6
 	k8s.io/code-generator v0.18.6
 	k8s.io/klog v1.0.0
 	k8s.io/kube-aggregator v0.18.6
@@ -55,8 +55,8 @@ require (
 )
 
 replace (
-	github.com/openshift/api => github.com/openshift/api v0.0.0-20200526144822-34f54f12813a
-	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20200521150516-05eb9880269c
+	github.com/openshift/api => github.com/openshift/api v0.0.0-20191219222812-2987a591a72c
+	github.com/openshift/client-go => github.com/openshift/client-go v0.0.0-20191125132246-f6563a70e19a
 	github.com/openshift/library-go => github.com/mhenriks/library-go v0.0.0-20200804184258-4fc3a5379c7a
 	github.com/operator-framework/operator-lifecycle-manager => github.com/operator-framework/operator-lifecycle-manager v0.0.0-20190128024246-5eb7ae5bdb7a
 
