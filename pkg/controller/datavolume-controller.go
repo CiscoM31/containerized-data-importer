@@ -228,6 +228,17 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 	datavolume := &cdiv1.DataVolume{}
 	if err := r.client.Get(context.TODO(), req.NamespacedName, datavolume); err != nil {
 		if k8serrors.IsNotFound(err) {
+			// lets look for PVC if it exists
+			pvc := &corev1.PersistentVolumeClaim{}
+			if err := r.client.Get(context.TODO(), req.NamespacedName, pvc); err != nil {
+					s := fmt.Sprintf("failed to find pvc for deleted datavolume %s", req.NamespacedName)
+					log.Info(s)
+			} else {
+				s := fmt.Sprintf("found pvc for deleted datavolume %s", req.NamespacedName)
+				log.Info(s)
+				msg := fmt.Sprintf("Deleted DataVolume %s", pvc.Name)
+				r.recorder.Event(pvc, corev1.EventTypeNormal, "Deletion", msg)
+			}
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -235,6 +246,8 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 
 	if datavolume.DeletionTimestamp != nil {
 		log.Info("Datavolume marked for deletion, skipping")
+		msg := fmt.Sprint("Deleted DataVolume %s", datavolume.Name)
+		r.recorder.Event(datavolume, corev1.EventTypeNormal, "Deletion", msg)
 		return reconcile.Result{}, nil
 	}
 
@@ -764,6 +777,22 @@ func (r *DatavolumeReconciler) updateCloneStatusPhase(pvc *corev1.PersistentVolu
 		}
 
 	}
+	if pvc.Spec.DataSource != nil {
+		// this is a CSI fast clone, update accordingly
+		switch pvc.Status.Phase  {
+		case corev1.ClaimBound:
+			dataVolumeCopy.Status.Phase = cdiv1.Succeeded
+			dataVolumeCopy.Status.Progress = cdiv1.DataVolumeProgress("100.0%")
+			event.eventType = corev1.EventTypeNormal
+			event.reason = CloneSucceeded
+			event.message = fmt.Sprintf(MessageCloneSucceeded, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name, pvc.Namespace, pvc.Name)
+		case corev1.ClaimPending:
+			dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
+			event.eventType = corev1.EventTypeNormal
+			event.reason = CloneScheduled
+			event.message = fmt.Sprintf(MessageCloneScheduled, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name, pvc.Namespace, pvc.Name)
+		}
+	}
 }
 
 func (r *DatavolumeReconciler) updateUploadStatusPhase(pvc *corev1.PersistentVolumeClaim, dataVolumeCopy *cdiv1.DataVolume, event *DataVolumeEvent) {
@@ -902,7 +931,13 @@ func (r *DatavolumeReconciler) reconcileDataVolumeStatus(dataVolume *cdiv1.DataV
 					}
 					_, ok = pvc.Annotations[AnnCloneRequest]
 					if ok {
-						dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
+						if pvc.Spec.DataSource != nil {
+							// if PVC Datasource is set and PVC is bound, storage provider
+							// fast clone is done.
+							dataVolumeCopy.Status.Phase = cdiv1.Succeeded
+						} else {
+							dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
+						}
 						r.updateCloneStatusPhase(pvc, dataVolumeCopy, &event)
 					}
 					_, ok = pvc.Annotations[AnnUploadRequest]
@@ -1205,7 +1240,7 @@ func (r *DatavolumeReconciler) newPersistentVolumeClaim(dataVolume *cdiv1.DataVo
 
 	annotations[AnnPreallocationRequested] = strconv.FormatBool(GetPreallocation(r.client, dataVolume))
 
-	return &corev1.PersistentVolumeClaim{
+	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        dataVolume.Name,
 			Namespace:   dataVolume.Namespace,
@@ -1220,5 +1255,16 @@ func (r *DatavolumeReconciler) newPersistentVolumeClaim(dataVolume *cdiv1.DataVo
 			},
 		},
 		Spec: *dataVolume.Spec.PVC,
-	}, nil
+	}
+
+	// If PVC Source is set. Set the DataSource
+	if dataVolume.Spec.Source.PVC != nil {
+		apigroup := ""
+		pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{}
+		pvc.Spec.DataSource.Kind = "PersistentVolumeClaim"
+		pvc.Spec.DataSource.Name = dataVolume.Spec.Source.PVC.Name
+		pvc.Spec.DataSource.APIGroup = &apigroup
+	}
+
+	return pvc, nil
 }

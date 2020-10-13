@@ -118,6 +118,12 @@ func (r *UploadReconciler) Reconcile(req reconcile.Request) (reconcile.Result, e
 	_, isCloneTarget := pvc.Annotations[AnnCloneRequest]
 	_, isImmediateBindingRequested := pvc.Annotations[AnnImmediateBinding]
 
+	if pvc.Spec.DataSource != nil {
+		// this is a fast clone request, nothing to do here.
+		log.V(1).Info("PVC has source datasource set for cloning, skipping slowclone.")
+		return reconcile.Result{}, nil
+	}
+
 	if isUpload && isCloneTarget {
 		log.V(1).Info("PVC has both clone and upload annotations")
 		return reconcile.Result{}, errors.New("PVC has both clone and upload annotations")
