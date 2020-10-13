@@ -194,6 +194,22 @@ func (r *CloneReconciler) Reconcile(req reconcile.Request) (reconcile.Result, er
 		return reconcile.Result{}, nil
 	}
 
+	if pvc.Spec.DataSource != nil {
+		// if DataSource is populated, we expect to use Storage providers fast clone
+		// which will be ready if PVC is bound.
+		if r.shouldReconcile(pvc, log) {
+			log.V(1).Info("Adding CloneOf annotation to PVC as clone is ready")
+			pvc.Annotations[AnnCloneOf] = "true"
+			r.recorder.Event(pvc, corev1.EventTypeNormal, CloneSucceededPVC, cloneComplete)
+			if err := r.updatePVC(pvc); err != nil {
+				return reconcile.Result{}, err
+			}
+			return reconcile.Result{}, nil
+		} else {
+			return reconcile.Result{Requeue: true}, nil
+		}
+	}
+
 	ready, err := r.waitTargetPodRunningOrSucceeded(pvc, log)
 	if err != nil {
 		return reconcile.Result{}, errors.Wrap(err, "error ensuring target upload pod running")
