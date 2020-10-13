@@ -136,7 +136,7 @@ fi
 
 echo "Starting bazel server"
 # Run the command
-test -t 1 && USE_TTY="-it"
+test -t 1 && USE_TTY="-t"
 docker exec ${USE_TTY} ${BAZEL_BUILDER_SERVER} /entrypoint-bazel.sh "$@"
 
 # Copy the whole containerized-data-importer data out to get generated sources and formatting changes
