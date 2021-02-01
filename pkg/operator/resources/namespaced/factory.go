@@ -19,8 +19,11 @@ package namespaced
 import (
 	"fmt"
 
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+
 	"k8s.io/apimachinery/pkg/runtime"
-	utils "kubevirt.io/containerized-data-importer/pkg/operator/resources/utils"
+
+	utils "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/resources"
 )
 
 // FactoryArgs contains the required parameters to generate all namespaced resources
@@ -36,6 +39,7 @@ type FactoryArgs struct {
 	Verbosity              string `required:"true"`
 	PullPolicy             string `required:"true" split_words:"true"`
 	Namespace              string
+	InfraNodePlacement     *sdkapi.NodePlacement
 }
 
 type factoryFunc func(*FactoryArgs) []runtime.Object

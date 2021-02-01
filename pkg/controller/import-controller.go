@@ -3,32 +3,54 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
+	"time"
+
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
 
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/record"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	cdiclientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
-	"kubevirt.io/containerized-data-importer/pkg/common"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	"kubevirt.io/containerized-data-importer/pkg/common"
+	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
+	"kubevirt.io/containerized-data-importer/pkg/util"
+	"kubevirt.io/containerized-data-importer/pkg/util/naming"
 )
 
 const (
 	importControllerAgentName = "import-controller"
+
+	// SourceHTTP is the source type HTTP, if unspecified or invalid, it defaults to SourceHTTP
+	SourceHTTP = "http"
+	// SourceS3 is the source type S3
+	SourceS3 = "s3"
+	// SourceGlance is the source type of glance
+	SourceGlance = "glance"
+	// SourceNone means there is no source.
+	SourceNone = "none"
+	// SourceRegistry is the source type of Registry
+	SourceRegistry = "registry"
+	// SourceImageio is the source type ovirt-imageio
+	SourceImageio = "imageio"
+	// SourceVDDK is the source type of VDDK
+	SourceVDDK = "vddk"
 
 	// AnnSource provide a const for our PVC import source annotation
 	AnnSource = AnnAPIGroup + "/storage.import.source"
@@ -46,6 +68,14 @@ const (
 	AnnRequiresScratch = AnnAPIGroup + "/storage.import.requiresScratch"
 	// AnnDiskID provides a const for our PVC diskId annotation
 	AnnDiskID = AnnAPIGroup + "/storage.import.diskId"
+	// AnnUUID provides a const for our PVC uuid annotation
+	AnnUUID = AnnAPIGroup + "/storage.import.uuid"
+	// AnnBackingFile provides a const for our PVC backing file annotation
+	AnnBackingFile = AnnAPIGroup + "/storage.import.backingFile"
+	// AnnThumbprint provides a const for our PVC backing thumbprint annotation
+	AnnThumbprint = AnnAPIGroup + "/storage.import.vddk.thumbprint"
+	// AnnPreallocationApplied provides a const for PVC preallocation annotation
+	AnnPreallocationApplied = AnnAPIGroup + "/storage.preallocation"
 
 	//LabelImportPvc is a pod label used to find the import pod that was created by the relevant PVC
 	LabelImportPvc = AnnAPIGroup + "/storage.import.importPvcName"
@@ -56,38 +86,70 @@ const (
 	ErrImportFailedPVC = "ErrImportFailed"
 	// ImportSucceededPVC provides a const to indicate an import to the PVC failed
 	ImportSucceededPVC = "ImportSucceeded"
+
+	// creatingScratch provides a const to indicate scratch is being created.
+	creatingScratch = "CreatingScratchSpace"
+
+	// ImportTargetInUse is reason for event created when an import pvc is in use
+	ImportTargetInUse = "ImportTargetInUse"
+
+	// PreallocationApplied is a string inserted into importer's/uploader's exit message
+	PreallocationApplied = "Preallocation applied"
+
+	// PreallocationSkipped is a string inserted into importer's/uploader's exit message
+	PreallocationSkipped = "Preallocation skipped"
 )
 
 // ImportReconciler members
 type ImportReconciler struct {
-	Client     client.Client
-	CdiClient  cdiclientset.Interface
-	K8sClient  kubernetes.Interface
-	recorder   record.EventRecorder
-	Scheme     *runtime.Scheme
-	Log        logr.Logger
-	Image      string
-	Verbose    string
-	PullPolicy string
+	client             client.Client
+	uncachedClient     client.Client
+	recorder           record.EventRecorder
+	scheme             *runtime.Scheme
+	log                logr.Logger
+	image              string
+	verbose            string
+	pullPolicy         string
+	filesystemOverhead string
+	featureGates       featuregates.FeatureGates
 }
 
 type importPodEnvVar struct {
-	ep, secretName, source, contentType, imageSize, certConfigMap, diskID string
-	insecureTLS                                                           bool
+	ep                 string
+	secretName         string
+	source             string
+	contentType        string
+	imageSize          string
+	certConfigMap      string
+	diskID             string
+	uuid               string
+	backingFile        string
+	thumbprint         string
+	filesystemOverhead string
+	insecureTLS        bool
+	currentCheckpoint  string
+	previousCheckpoint string
+	finalCheckpoint    string
+	preallocation      bool
 }
 
 // NewImportController creates a new instance of the import controller.
-func NewImportController(mgr manager.Manager, cdiClient *cdiclientset.Clientset, k8sClient kubernetes.Interface, log logr.Logger, importerImage, pullPolicy, verbose string) (controller.Controller, error) {
+func NewImportController(mgr manager.Manager, log logr.Logger, importerImage, pullPolicy, verbose string) (controller.Controller, error) {
+	uncachedClient, err := client.New(mgr.GetConfig(), client.Options{
+		Scheme: mgr.GetScheme(),
+		Mapper: mgr.GetRESTMapper(),
+	})
+	client := mgr.GetClient()
 	reconciler := &ImportReconciler{
-		Client:     mgr.GetClient(),
-		Scheme:     mgr.GetScheme(),
-		CdiClient:  cdiClient,
-		K8sClient:  k8sClient,
-		Log:        log.WithName("import-controller"),
-		Image:      importerImage,
-		Verbose:    verbose,
-		PullPolicy: pullPolicy,
-		recorder:   mgr.GetEventRecorderFor("import-controller"),
+		client:         client,
+		uncachedClient: uncachedClient,
+		scheme:         mgr.GetScheme(),
+		log:            log.WithName("import-controller"),
+		image:          importerImage,
+		verbose:        verbose,
+		pullPolicy:     pullPolicy,
+		recorder:       mgr.GetEventRecorderFor("import-controller"),
+		featureGates:   featuregates.NewFeatureGates(client),
 	}
 	importController, err := controller.New("import-controller", mgr, controller.Options{
 		Reconciler: reconciler,
@@ -116,8 +178,19 @@ func addImportControllerWatches(mgr manager.Manager, importController controller
 	return nil
 }
 
-func shouldReconcilePVC(pvc *corev1.PersistentVolumeClaim) bool {
-	return !isPVCComplete(pvc) && (checkPVC(pvc, AnnEndpoint) || checkPVC(pvc, AnnSource))
+func shouldReconcilePVC(pvc *corev1.PersistentVolumeClaim,
+	isImmediateBindingRequested bool,
+	featureGates featuregates.FeatureGates,
+	log logr.Logger) (bool, error) {
+	waitForFirstConsumerEnabled, err := isWaitForFirstConsumerEnabled(isImmediateBindingRequested, featureGates)
+
+	if err != nil {
+		return false, err
+	}
+	return !isPVCComplete(pvc) &&
+			(checkPVC(pvc, AnnEndpoint, log) || checkPVC(pvc, AnnSource, log)) &&
+			shouldHandlePvc(pvc, waitForFirstConsumerEnabled, log),
+		nil
 }
 
 func isPVCComplete(pvc *corev1.PersistentVolumeClaim) bool {
@@ -127,28 +200,36 @@ func isPVCComplete(pvc *corev1.PersistentVolumeClaim) bool {
 
 // Reconcile the reconcile loop for the CDIConfig object.
 func (r *ImportReconciler) Reconcile(req reconcile.Request) (reconcile.Result, error) {
-	log := r.Log.WithValues("PVC", req.NamespacedName)
+	log := r.log.WithValues("PVC", req.NamespacedName)
 	log.V(1).Info("reconciling Import PVCs")
 
 	// Get the PVC.
 	pvc := &corev1.PersistentVolumeClaim{}
-	if err := r.Client.Get(context.TODO(), req.NamespacedName, pvc); err != nil {
+	if err := r.client.Get(context.TODO(), req.NamespacedName, pvc); err != nil {
 		if k8serrors.IsNotFound(err) {
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
 	}
+	_, isImmediateBindingRequested := pvc.Annotations[AnnImmediateBinding]
 
-	if !shouldReconcilePVC(pvc) {
-		log.V(1).Info("Should not reconcile this PVC", "pvc.annotation.phase.complete", isPVCComplete(pvc),
-			"pvc.annotations.endpoint", checkPVC(pvc, AnnEndpoint), "pvc.annotations.source", checkPVC(pvc, AnnSource))
+	shouldReconcile, err := shouldReconcilePVC(pvc, isImmediateBindingRequested, r.featureGates, log)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if !shouldReconcile {
+		log.V(1).Info("Should not reconcile this PVC",
+			"pvc.annotation.phase.complete", isPVCComplete(pvc),
+			"pvc.annotations.endpoint", checkPVC(pvc, AnnEndpoint, log),
+			"pvc.annotations.source", checkPVC(pvc, AnnSource, log),
+			"isBound", isBound(pvc, log))
 		return reconcile.Result{}, nil
 	}
 
 	// In case this is a request to create a blank disk on a block device, we do not create a pod.
 	// we just mark the DV as successful
 	volumeMode := getVolumeMode(pvc)
-	if volumeMode == corev1.PersistentVolumeBlock && pvc.GetAnnotations()[AnnSource] == SourceNone {
+	if volumeMode == corev1.PersistentVolumeBlock && pvc.GetAnnotations()[AnnSource] == SourceNone && pvc.GetAnnotations()[AnnPreallocationRequested] != "true" {
 		log.V(1).Info("attempting to create blank disk for block mode, this is a no-op, marking pvc with pod-phase succeeded")
 		if pvc.GetAnnotations() == nil {
 			pvc.SetAnnotations(make(map[string]string, 0))
@@ -163,11 +244,12 @@ func (r *ImportReconciler) Reconcile(req reconcile.Request) (reconcile.Result, e
 }
 
 func (r *ImportReconciler) findImporterPod(pvc *corev1.PersistentVolumeClaim, log logr.Logger) (*corev1.Pod, error) {
-	podName := importPodNameFromPvc(pvc)
+	podName := getImportPodNameFromPvc(pvc)
 	pod := &corev1.Pod{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: podName, Namespace: pvc.GetNamespace()}, pod)
-
-	if k8serrors.IsNotFound(err) {
+	if err := r.client.Get(context.TODO(), types.NamespacedName{Name: podName, Namespace: pvc.GetNamespace()}, pod); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return nil, errors.Wrapf(err, "error getting import pod %s/%s", pvc.Namespace, podName)
+		}
 		return nil, nil
 	}
 
@@ -185,31 +267,83 @@ func (r *ImportReconciler) reconcilePvc(pvc *corev1.PersistentVolumeClaim, log l
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+
 	if pod == nil {
 		if isPVCComplete(pvc) {
 			// Don't create the POD if the PVC is completed already
 			log.V(1).Info("PVC is already complete")
 		} else if pvc.DeletionTimestamp == nil {
-			// Create importer pod, make sure the PVC owns it.
-			if err := r.createImporterPod(pvc); err != nil {
+			podsUsingPVC, err := getPodsUsingPVCs(r.client, pvc.Namespace, sets.NewString(pvc.Name), false)
+			if err != nil {
 				return reconcile.Result{}, err
+			}
+
+			if len(podsUsingPVC) > 0 {
+				for _, pod := range podsUsingPVC {
+					r.log.V(1).Info("can't create import pod, pvc in use by other pod",
+						"namespace", pvc.Namespace, "name", pvc.Name, "pod", pod.Name)
+					r.recorder.Eventf(pvc, corev1.EventTypeWarning, ImportTargetInUse,
+						"pod %s/%s using PersistentVolumeClaim %s", pod.Namespace, pod.Name, pvc.Name)
+
+				}
+				return reconcile.Result{Requeue: true}, nil
+			}
+
+			if _, ok := pvc.Annotations[AnnImportPod]; ok {
+				// Create importer pod, make sure the PVC owns it.
+				if err := r.createImporterPod(pvc); err != nil {
+					return reconcile.Result{}, err
+				}
+			} else {
+				// Create importer pod Name and store in PVC?
+				if err := r.initPvcPodName(pvc, log); err != nil {
+					return reconcile.Result{}, err
+				}
 			}
 		}
 	} else {
 		if pvc.DeletionTimestamp != nil {
 			log.V(1).Info("PVC being terminated, delete pods", "pod.Name", pod.Name)
-			if err := r.Client.Delete(context.TODO(), pod); IgnoreNotFound(err) != nil {
+			if err := r.client.Delete(context.TODO(), pod); IgnoreNotFound(err) != nil {
 				return reconcile.Result{}, err
 			}
-			return reconcile.Result{}, nil
-		}
-
-		// Pod exists, we need to update the PVC status.
-		if err := r.updatePvcFromPod(pvc, pod, log); err != nil {
-			return reconcile.Result{}, err
+		} else {
+			// Pod exists, we need to update the PVC status.
+			if err := r.updatePvcFromPod(pvc, pod, log); err != nil {
+				return reconcile.Result{}, err
+			}
 		}
 	}
+
+	if !isPVCComplete(pvc) {
+		// We are not done yet, force a re-reconcile in 2 seconds to get an update.
+		log.V(1).Info("Force Reconcile pvc import not finished", "pvc.Name", pvc.Name)
+
+		return reconcile.Result{RequeueAfter: 2 * time.Second}, nil
+	}
 	return reconcile.Result{}, nil
+}
+
+func (r *ImportReconciler) initPvcPodName(pvc *corev1.PersistentVolumeClaim, log logr.Logger) error {
+	currentPvcCopy := pvc.DeepCopyObject()
+
+	log.V(1).Info("Init pod name on PVC")
+	anno := pvc.GetAnnotations()
+
+	anno[AnnImportPod] = createImportPodNameFromPvc(pvc)
+
+	requiresScratch := r.requiresScratchSpace(pvc)
+	if requiresScratch {
+		anno[AnnRequiresScratch] = "true"
+	}
+
+	if !reflect.DeepEqual(currentPvcCopy, pvc) {
+		if err := r.updatePVC(pvc, log); err != nil {
+			return err
+		}
+		log.V(1).Info("Updated PVC", "pvc.anno.AnnImportPod", anno[AnnImportPod])
+	}
+	return nil
 }
 
 func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, pod *corev1.Pod, log logr.Logger) error {
@@ -218,8 +352,11 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 
 	log.V(1).Info("Updating PVC from pod")
 	anno := pvc.GetAnnotations()
+	setConditionFromPodWithPrefix(anno, AnnRunningCondition, pod)
+
 	scratchExitCode := false
-	if pod.Status.ContainerStatuses != nil && pod.Status.ContainerStatuses[0].LastTerminationState.Terminated != nil &&
+	if pod.Status.ContainerStatuses != nil &&
+		pod.Status.ContainerStatuses[0].LastTerminationState.Terminated != nil &&
 		pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode > 0 {
 		log.Info("Pod termination code", "pod.Name", pod.Name, "ExitCode", pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode)
 		if pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.ExitCode == common.ScratchSpaceNeededExitCode {
@@ -230,10 +367,31 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 			r.recorder.Event(pvc, corev1.EventTypeWarning, ErrImportFailedPVC, pod.Status.ContainerStatuses[0].LastTerminationState.Terminated.Message)
 		}
 	}
+	if pod.Status.ContainerStatuses != nil &&
+		pod.Status.ContainerStatuses[0].State.Terminated != nil &&
+		pod.Status.ContainerStatuses[0].State.Terminated.ExitCode == 0 {
+		if strings.Contains(pod.Status.ContainerStatuses[0].State.Terminated.Message, PreallocationApplied) {
+			anno[AnnPreallocationApplied] = "true"
+		}
+		if strings.Contains(pod.Status.ContainerStatuses[0].State.Terminated.Message, PreallocationSkipped) {
+			anno[AnnPreallocationApplied] = "skipped"
+		}
+	}
+
+	if anno[AnnCurrentCheckpoint] != "" {
+		anno[AnnCurrentPodID] = string(pod.ObjectMeta.UID)
+	}
+
+	if pod.Status.ContainerStatuses != nil {
+		anno[AnnPodRestarts] = strconv.Itoa(int(pod.Status.ContainerStatuses[0].RestartCount))
+	}
 
 	anno[AnnImportPod] = string(pod.Name)
-	// Even if scratch space is needed, the pod state will still remain running, until the new pod is started.
-	anno[AnnPodPhase] = string(pod.Status.Phase)
+	if !scratchExitCode {
+		// No scratch exit code, update the phase based on the pod. If we do have scratch exit code we don't want to update the
+		// phase, because the pod might terminate cleanly and mistakenly mark the import complete.
+		anno[AnnPodPhase] = string(pod.Status.Phase)
+	}
 
 	// Check if the POD is waiting for scratch space, if so create some.
 	if pod.Status.Phase == corev1.PodPending && r.requiresScratchSpace(pvc) {
@@ -242,7 +400,13 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 				return err
 			}
 		}
+	} else {
+		// No scratch space, or scratch space is bound, remove annotation
+		delete(anno, AnnBoundCondition)
+		delete(anno, AnnBoundConditionMessage)
+		delete(anno, AnnBoundConditionReason)
 	}
+
 	if !checkIfLabelExists(pvc, common.CDILabelKey, common.CDILabelValue) {
 		if pvc.GetLabels() == nil {
 			pvc.SetLabels(make(map[string]string, 0))
@@ -254,7 +418,7 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 		if err := r.updatePVC(pvc, log); err != nil {
 			return err
 		}
-		log.V(1).Info("Updated PVC", "pvc.anno.Phase", anno[AnnPodPhase])
+		log.V(1).Info("Updated PVC", "pvc.anno.Phase", anno[AnnPodPhase], "pvc.anno.Restarts", anno[AnnPodRestarts])
 	}
 
 	if isPVCComplete(pvc) || scratchExitCode {
@@ -262,7 +426,7 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 			r.recorder.Event(pvc, corev1.EventTypeNormal, ImportSucceededPVC, "Import Successful")
 			log.V(1).Info("Completed successfully, deleting POD", "pod.Name", pod.Name)
 		}
-		if err := r.Client.Delete(context.TODO(), pod); IgnoreNotFound(err) != nil {
+		if err := r.client.Delete(context.TODO(), pod); IgnoreNotFound(err) != nil {
 			return err
 		}
 	}
@@ -270,41 +434,180 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 }
 
 func (r *ImportReconciler) updatePVC(pvc *corev1.PersistentVolumeClaim, log logr.Logger) error {
-	log.V(1).Info("Phase is now", "pvc.anno.Phase", pvc.GetAnnotations()[AnnPodPhase])
-	if err := r.Client.Update(context.TODO(), pvc); err != nil {
+	log.V(1).Info("Annotations are now", "pvc.anno", pvc.GetAnnotations())
+	if err := r.client.Update(context.TODO(), pvc); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (r *ImportReconciler) createImporterPod(pvc *corev1.PersistentVolumeClaim) error {
-	r.Log.V(1).Info("Creating importer POD for PVC", "pvc.Name", pvc.Name)
+	r.log.V(1).Info("Creating importer POD for PVC", "pvc.Name", pvc.Name)
 	var scratchPvcName *string
+	var vddkImageName *string
 	var err error
 
 	requiresScratch := r.requiresScratchSpace(pvc)
 	if requiresScratch {
-		name := scratchNameFromPvc(pvc)
+		name := createScratchNameFromPvc(pvc)
 		scratchPvcName = &name
 	}
 
-	podEnvVar, err := createImportEnvVar(r.K8sClient, pvc)
+	if getSource(pvc) == SourceVDDK {
+		r.log.V(1).Info("Pod requires VDDK sidecar for VMware transfer")
+		vddkImageName, err = r.getVddkImageName()
+		if err != nil {
+			return err
+		}
+	}
+
+	podEnvVar, err := r.createImportEnvVar(pvc)
 	if err != nil {
 		return err
 	}
 
 	// all checks passed, let's create the importer pod!
-	pod, err := createImporterPod(r.Log, r.Client, r.CdiClient, r.Image, r.Verbose, r.PullPolicy, podEnvVar, pvc, scratchPvcName)
+	pod, err := createImporterPod(r.log, r.client, r.image, r.verbose, r.pullPolicy, podEnvVar, pvc, scratchPvcName, vddkImageName)
 
 	if err != nil {
 		return err
 	}
-	r.Log.V(1).Info("Created POD", "pod.Name", pod.Name)
+	r.log.V(1).Info("Created POD", "pod.Name", pod.Name)
 	if requiresScratch {
-		r.Log.V(1).Info("POD requires scratch space")
+		r.log.V(1).Info("Pod requires scratch space")
 		return r.createScratchPvcForPod(pvc, pod)
 	}
+
 	return nil
+}
+
+func (r *ImportReconciler) createImportEnvVar(pvc *corev1.PersistentVolumeClaim) (*importPodEnvVar, error) {
+	podEnvVar := &importPodEnvVar{}
+	podEnvVar.source = getSource(pvc)
+	podEnvVar.contentType = getContentType(pvc)
+
+	var err error
+	if podEnvVar.source != SourceNone {
+		podEnvVar.ep, err = getEndpoint(pvc)
+		if err != nil {
+			return nil, err
+		}
+		podEnvVar.secretName = r.getSecretName(pvc)
+		if podEnvVar.secretName == "" {
+			r.log.V(2).Info("no secret will be supplied to endpoint", "endPoint", podEnvVar.ep)
+		}
+		podEnvVar.certConfigMap, err = r.getCertConfigMap(pvc)
+		if err != nil {
+			return nil, err
+		}
+		fsOverhead, err := GetFilesystemOverhead(r.client, pvc)
+		if err != nil {
+			return nil, err
+		}
+		podEnvVar.filesystemOverhead = string(fsOverhead)
+		podEnvVar.insecureTLS, err = r.isInsecureTLS(pvc)
+		if err != nil {
+			return nil, err
+		}
+		podEnvVar.diskID = getValueFromAnnotation(pvc, AnnDiskID)
+		podEnvVar.backingFile = getValueFromAnnotation(pvc, AnnBackingFile)
+		podEnvVar.uuid = getValueFromAnnotation(pvc, AnnUUID)
+		podEnvVar.thumbprint = getValueFromAnnotation(pvc, AnnThumbprint)
+		podEnvVar.previousCheckpoint = getValueFromAnnotation(pvc, AnnPreviousCheckpoint)
+		podEnvVar.currentCheckpoint = getValueFromAnnotation(pvc, AnnCurrentCheckpoint)
+		podEnvVar.finalCheckpoint = getValueFromAnnotation(pvc, AnnFinalCheckpoint)
+	}
+
+	if preallocation, err := strconv.ParseBool(getValueFromAnnotation(pvc, AnnPreallocationRequested)); err == nil {
+		podEnvVar.preallocation = preallocation
+	} // else use the default "false"
+
+	//get the requested image size.
+	podEnvVar.imageSize, err = getRequestedImageSize(pvc)
+	if err != nil {
+		return nil, err
+	}
+	return podEnvVar, nil
+}
+
+func (r *ImportReconciler) isInsecureTLS(pvc *corev1.PersistentVolumeClaim) (bool, error) {
+	var configMapName string
+
+	value, ok := pvc.Annotations[AnnEndpoint]
+	if !ok || value == "" {
+		return false, nil
+	}
+
+	url, err := url.Parse(value)
+	if err != nil {
+		return false, err
+	}
+
+	switch url.Scheme {
+	case "docker":
+		configMapName = common.InsecureRegistryConfigMap
+	default:
+		return false, nil
+	}
+
+	r.log.V(1).Info("Checking configmap for host", "configMapName", configMapName, "host URL", url.Host)
+
+	cm := &corev1.ConfigMap{}
+	if err := r.uncachedClient.Get(context.TODO(), types.NamespacedName{Name: configMapName, Namespace: util.GetNamespace()}, cm); err != nil {
+		if k8serrors.IsNotFound(err) {
+			r.log.V(1).Info("Configmap does not exist", "configMapName", configMapName)
+			return false, nil
+		}
+		return false, err
+	}
+
+	for key, value := range cm.Data {
+		r.log.V(1).Info("Checking host against key, value pair", "host", url.Host, "Key", key, "Value", value)
+
+		if value == url.Host {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
+func (r *ImportReconciler) getCertConfigMap(pvc *corev1.PersistentVolumeClaim) (string, error) {
+	value, ok := pvc.Annotations[AnnCertConfigMap]
+	if !ok || value == "" {
+		return "", nil
+	}
+
+	configMap := &corev1.ConfigMap{}
+	if err := r.uncachedClient.Get(context.TODO(), types.NamespacedName{Name: value, Namespace: pvc.Namespace}, configMap); err != nil {
+		if k8serrors.IsNotFound(err) {
+			r.log.V(1).Info("Configmap does not exist, pod will not start until it does", "configMapName", value)
+			return value, nil
+		}
+
+		return "", err
+	}
+
+	return value, nil
+}
+
+// returns the name of the secret containing endpoint credentials consumed by the importer pod.
+// A value of "" implies there are no credentials for the endpoint being used. A returned error
+// causes processNextItem() to stop.
+func (r *ImportReconciler) getSecretName(pvc *corev1.PersistentVolumeClaim) string {
+	ns := pvc.Namespace
+	name, found := pvc.Annotations[AnnSecret]
+	if !found || name == "" {
+		msg := "getEndpointSecret: "
+		if !found {
+			msg += fmt.Sprintf("annotation %q is missing in pvc \"%s/%s\"", AnnSecret, ns, pvc.Name)
+		} else {
+			msg += fmt.Sprintf("secret name is missing from annotation %q in pvc \"%s/%s\"", AnnSecret, ns, pvc.Name)
+		}
+		r.log.V(2).Info(msg)
+		return "" // importer pod will not contain secret credentials
+	}
+	return name
 }
 
 func (r *ImportReconciler) requiresScratchSpace(pvc *corev1.PersistentVolumeClaim) bool {
@@ -331,40 +634,138 @@ func (r *ImportReconciler) requiresScratchSpace(pvc *corev1.PersistentVolumeClai
 
 func (r *ImportReconciler) createScratchPvcForPod(pvc *corev1.PersistentVolumeClaim, pod *corev1.Pod) error {
 	scratchPvc := &corev1.PersistentVolumeClaim{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{Namespace: pvc.GetNamespace(), Name: scratchNameFromPvc(pvc)}, scratchPvc)
+	scratchPVCName, exists := getScratchNameFromPod(pod)
+	if !exists {
+		return errors.New("Scratch Volume not configured for pod")
+	}
+	anno := pvc.GetAnnotations()
+	err := r.client.Get(context.TODO(), types.NamespacedName{Namespace: pvc.GetNamespace(), Name: scratchPVCName}, scratchPvc)
 	if IgnoreNotFound(err) != nil {
 		return err
 	}
 	if k8serrors.IsNotFound(err) {
-		scratchPVCName := scratchNameFromPvc(pvc)
-		storageClassName := GetScratchPvcStorageClass(r.K8sClient, r.CdiClient, pvc)
+		r.log.V(1).Info("Creating scratch space for POD and PVC", "pod.Name", pod.Name, "pvc.Name", pvc.Name)
+
+		storageClassName := GetScratchPvcStorageClass(r.client, pvc)
 		// Scratch PVC doesn't exist yet, create it. Determine which storage class to use.
-		_, err = CreateScratchPersistentVolumeClaim(r.K8sClient, pvc, pod, scratchPVCName, storageClassName)
+		_, err = CreateScratchPersistentVolumeClaim(r.client, pvc, pod, scratchPVCName, storageClassName)
 		if err != nil {
 			return err
 		}
+		anno[AnnBoundCondition] = "false"
+		anno[AnnBoundConditionMessage] = "Creating scratch space"
+		anno[AnnBoundConditionReason] = creatingScratch
+	} else {
+		setBoundConditionFromPVC(anno, AnnBoundCondition, scratchPvc)
 	}
 	return nil
 }
 
-func importPodNameFromPvc(pvc *corev1.PersistentVolumeClaim) string {
-	return fmt.Sprintf("%s-%s", common.ImporterPodName, pvc.Name)
+// Get path to VDDK image from 'v2v-vmware' ConfigMap
+func (r *ImportReconciler) getVddkImageName() (*string, error) {
+	namespace := util.GetNamespace()
+
+	cm := &corev1.ConfigMap{}
+	err := r.uncachedClient.Get(context.TODO(), types.NamespacedName{Name: common.VddkConfigMap, Namespace: namespace}, cm)
+	if k8serrors.IsNotFound(err) {
+		return nil, errors.Errorf("No %s ConfigMap present in namespace %s", common.VddkConfigMap, namespace)
+	}
+
+	image, found := cm.Data[common.VddkConfigDataKey]
+	if found {
+		msg := fmt.Sprintf("Found %s ConfigMap in namespace %s, VDDK image path is: ", common.VddkConfigMap, namespace)
+		r.log.V(1).Info(msg, common.VddkConfigDataKey, image)
+		return &image, nil
+	}
+
+	return nil, errors.Errorf("Found %s ConfigMap in namespace %s, but it does not contain a '%s' entry.", common.VddkConfigMap, namespace, common.VddkConfigDataKey)
 }
 
-func scratchNameFromPvc(pvc *corev1.PersistentVolumeClaim) string {
-	return fmt.Sprintf("%s-scratch", pvc.Name)
+// returns the source string which determines the type of source. If no source or invalid source found, default to http
+func getSource(pvc *corev1.PersistentVolumeClaim) string {
+	source, found := pvc.Annotations[AnnSource]
+	if !found {
+		source = ""
+	}
+	switch source {
+	case
+		SourceHTTP,
+		SourceS3,
+		SourceGlance,
+		SourceNone,
+		SourceRegistry,
+		SourceImageio,
+		SourceVDDK:
+	default:
+		source = SourceHTTP
+	}
+	return source
+}
+
+// returns the source string which determines the type of source. If no source or invalid source found, default to http
+func getContentType(pvc *corev1.PersistentVolumeClaim) string {
+	contentType, found := pvc.Annotations[AnnContentType]
+	if !found {
+		contentType = ""
+	}
+	switch contentType {
+	case
+		string(cdiv1.DataVolumeKubeVirt),
+		string(cdiv1.DataVolumeArchive):
+	default:
+		contentType = string(cdiv1.DataVolumeKubeVirt)
+	}
+	return contentType
+}
+
+// returns the endpoint string which contains the full path URI of the target object to be copied.
+func getEndpoint(pvc *corev1.PersistentVolumeClaim) (string, error) {
+	ep, found := pvc.Annotations[AnnEndpoint]
+	if !found || ep == "" {
+		verb := "empty"
+		if !found {
+			verb = "missing"
+		}
+		return ep, errors.Errorf("annotation %q in pvc \"%s/%s\" is %s\n", AnnEndpoint, pvc.Namespace, pvc.Name, verb)
+	}
+	return ep, nil
+}
+
+// getValueFromAnnotation returns the value of an annotation
+func getValueFromAnnotation(pvc *corev1.PersistentVolumeClaim, annotation string) string {
+	value, _ := pvc.Annotations[annotation]
+	return value
+}
+
+func getImportPodNameFromPvc(pvc *corev1.PersistentVolumeClaim) string {
+	podName, ok := pvc.Annotations[AnnImportPod]
+	if ok {
+		return podName
+	}
+	// fallback to legacy naming, in fact the following function is fully compatible with legacy
+	// name concatenation "importer-{pvc.Name}" if the name length is under the size limits,
+	return naming.GetResourceName(common.ImporterPodName, pvc.Name)
+}
+
+func createImportPodNameFromPvc(pvc *corev1.PersistentVolumeClaim) string {
+	return naming.GetResourceName(common.ImporterPodName, pvc.Name)
 }
 
 // createImporterPod creates and returns a pointer to a pod which is created based on the passed-in endpoint, secret
 // name, and pvc. A nil secret means the endpoint credentials are not passed to the
 // importer pod.
-func createImporterPod(log logr.Logger, client client.Client, cdiClient cdiclientset.Interface, image, verbose, pullPolicy string, podEnvVar *importPodEnvVar, pvc *corev1.PersistentVolumeClaim, scratchPvcName *string) (*v1.Pod, error) {
+func createImporterPod(log logr.Logger, client client.Client, image, verbose, pullPolicy string, podEnvVar *importPodEnvVar, pvc *corev1.PersistentVolumeClaim, scratchPvcName *string, vddkImageName *string) (*corev1.Pod, error) {
 	podResourceRequirements, err := GetDefaultPodResourceRequirements(client)
 	if err != nil {
 		return nil, err
 	}
 
-	pod := makeImporterPodSpec(pvc.Namespace, image, verbose, pullPolicy, podEnvVar, pvc, scratchPvcName, podResourceRequirements)
+	workloadNodePlacement, err := GetWorkloadNodePlacement(client)
+	if err != nil {
+		return nil, err
+	}
+
+	pod := makeImporterPodSpec(pvc.Namespace, image, verbose, pullPolicy, podEnvVar, pvc, scratchPvcName, podResourceRequirements, workloadNodePlacement, vddkImageName)
 
 	if err := client.Create(context.TODO(), pod); err != nil {
 		return nil, err
@@ -374,9 +775,9 @@ func createImporterPod(log logr.Logger, client client.Client, cdiClient cdiclien
 }
 
 // makeImporterPodSpec creates and return the importer pod spec based on the passed-in endpoint, secret and pvc.
-func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar *importPodEnvVar, pvc *corev1.PersistentVolumeClaim, scratchPvcName *string, podResourceRequirements *v1.ResourceRequirements) *corev1.Pod {
+func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar *importPodEnvVar, pvc *corev1.PersistentVolumeClaim, scratchPvcName *string, podResourceRequirements *corev1.ResourceRequirements, workloadNodePlacement *sdkapi.NodePlacement, vddkImageName *string) *corev1.Pod {
 	// importer pod name contains the pvc name
-	podName := importPodNameFromPvc(pvc)
+	podName, _ := pvc.Annotations[AnnImportPod]
 
 	blockOwnerDeletion := true
 	isController := true
@@ -419,9 +820,7 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 			Labels: map[string]string{
 				common.CDILabelKey:       common.CDILabelValue,
 				common.CDIComponentLabel: common.ImporterPodName,
-				// this label is used when searching for a pvc's import pod.
-				LabelImportPvc:         pvc.Name,
-				common.PrometheusLabel: "",
+				common.PrometheusLabel:   "",
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				{
@@ -452,6 +851,9 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 			},
 			RestartPolicy: corev1.RestartPolicyOnFailure,
 			Volumes:       volumes,
+			NodeSelector:  workloadNodePlacement.NodeSelector,
+			Tolerations:   workloadNodePlacement.Tolerations,
+			Affinity:      workloadNodePlacement.Affinity,
 		},
 	}
 
@@ -477,6 +879,29 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
 			Name:      ScratchVolName,
 			MountPath: common.ScratchDataDir,
+		})
+	}
+
+	if vddkImageName != nil {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: "vddk-vol-mount",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, corev1.Container{
+			Name:  "vddk-side-car",
+			Image: *vddkImageName,
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "vddk-vol-mount",
+					MountPath: "/opt",
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      "vddk-vol-mount",
+			MountPath: "/opt",
 		})
 	}
 
@@ -511,12 +936,13 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 		fsGroup := common.QemuSubGid
 		pod.Spec.SecurityContext.FSGroup = &fsGroup
 	}
+	SetPodPvcAnnotations(pod, pvc)
 	return pod
 }
 
 // this is being called for pods using PV with filesystem volume mode
-func addImportVolumeMounts() []v1.VolumeMount {
-	volumeMounts := []v1.VolumeMount{
+func addImportVolumeMounts() []corev1.VolumeMount {
+	volumeMounts := []corev1.VolumeMount{
 		{
 			Name:      DataVolName,
 			MountPath: common.ImporterDataDir,
@@ -526,8 +952,8 @@ func addImportVolumeMounts() []v1.VolumeMount {
 }
 
 // return the Env portion for the importer container.
-func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []v1.EnvVar {
-	env := []v1.EnvVar{
+func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []corev1.EnvVar {
+	env := []corev1.EnvVar{
 		{
 			Name:  common.ImporterSource,
 			Value: podEnvVar.source,
@@ -549,6 +975,10 @@ func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []v1.EnvVar {
 			Value: string(uid),
 		},
 		{
+			Name:  common.FilesystemOverheadVar,
+			Value: podEnvVar.filesystemOverhead,
+		},
+		{
 			Name:  common.InsecureTLSVar,
 			Value: strconv.FormatBool(podEnvVar.insecureTLS),
 		},
@@ -556,23 +986,51 @@ func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []v1.EnvVar {
 			Name:  common.ImporterDiskID,
 			Value: podEnvVar.diskID,
 		},
+		{
+			Name:  common.ImporterUUID,
+			Value: podEnvVar.uuid,
+		},
+		{
+			Name:  common.ImporterBackingFile,
+			Value: podEnvVar.backingFile,
+		},
+		{
+			Name:  common.ImporterThumbprint,
+			Value: podEnvVar.thumbprint,
+		},
+		{
+			Name:  common.ImporterCurrentCheckpoint,
+			Value: podEnvVar.currentCheckpoint,
+		},
+		{
+			Name:  common.ImporterPreviousCheckpoint,
+			Value: podEnvVar.previousCheckpoint,
+		},
+		{
+			Name:  common.ImporterFinalCheckpoint,
+			Value: podEnvVar.finalCheckpoint,
+		},
+		{
+			Name:  common.Preallocation,
+			Value: strconv.FormatBool(podEnvVar.preallocation),
+		},
 	}
 	if podEnvVar.secretName != "" {
-		env = append(env, v1.EnvVar{
+		env = append(env, corev1.EnvVar{
 			Name: common.ImporterAccessKeyID,
-			ValueFrom: &v1.EnvVarSource{
-				SecretKeyRef: &v1.SecretKeySelector{
-					LocalObjectReference: v1.LocalObjectReference{
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
 						Name: podEnvVar.secretName,
 					},
 					Key: common.KeyAccess,
 				},
 			},
-		}, v1.EnvVar{
+		}, corev1.EnvVar{
 			Name: common.ImporterSecretKey,
-			ValueFrom: &v1.EnvVarSource{
-				SecretKeyRef: &v1.SecretKeySelector{
-					LocalObjectReference: v1.LocalObjectReference{
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
 						Name: podEnvVar.secretName,
 					},
 					Key: common.KeySecret,
@@ -582,7 +1040,7 @@ func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []v1.EnvVar {
 
 	}
 	if podEnvVar.certConfigMap != "" {
-		env = append(env, v1.EnvVar{
+		env = append(env, corev1.EnvVar{
 			Name:  common.ImporterCertDirVar,
 			Value: common.ImporterCertDir,
 		})

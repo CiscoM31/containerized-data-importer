@@ -1,11 +1,22 @@
 package utils
 
 import (
+	"context"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	"github.com/onsi/ginkgo"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	"kubevirt.io/containerized-data-importer/pkg/controller"
 )
 
 // cdi-file-host pod/service relative values
@@ -49,7 +60,7 @@ var (
 )
 
 func getDefaultStorageClass(client *kubernetes.Clientset) *storagev1.StorageClass {
-	storageclasses, err := client.StorageV1().StorageClasses().List(metav1.ListOptions{})
+	storageclasses, err := client.StorageV1().StorageClasses().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		ginkgo.Fail("Unable to list storage classes")
 		return nil
@@ -65,7 +76,7 @@ func getDefaultStorageClass(client *kubernetes.Clientset) *storagev1.StorageClas
 
 func isDefaultStorageClassCSI(client *kubernetes.Clientset) bool {
 	if DefaultStorageClass != nil {
-		_, err := client.StorageV1beta1().CSIDrivers().Get(DefaultStorageClass.Provisioner, metav1.GetOptions{})
+		_, err := client.StorageV1beta1().CSIDrivers().Get(context.TODO(), DefaultStorageClass.Provisioner, metav1.GetOptions{})
 		if err != nil {
 			return false
 		}
@@ -82,6 +93,14 @@ func IsHostpathProvisioner() bool {
 	return DefaultStorageClass.Provisioner == "kubevirt.io/hostpath-provisioner"
 }
 
+// GetTestNamespaceList returns a list of namespaces that have been created by the functional tests.
+func GetTestNamespaceList(client *kubernetes.Clientset, nsPrefix string) (*corev1.NamespaceList, error) {
+	//Ensure that no namespaces with the prefix label exist
+	return client.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{
+		LabelSelector: nsPrefix,
+	})
+}
+
 // CacheTestsData fetch and cache data required for tests
 func CacheTestsData(client *kubernetes.Clientset, cdiNs string) {
 	if DefaultStorageClass == nil {
@@ -95,7 +114,7 @@ func CacheTestsData(client *kubernetes.Clientset, cdiNs string) {
 }
 
 func getNfsService(client *kubernetes.Clientset, cdiNs string) *corev1.Service {
-	service, err := client.CoreV1().Services(cdiNs).Get("nfs-service", metav1.GetOptions{})
+	service, err := client.CoreV1().Services(cdiNs).Get(context.TODO(), "nfs-service", metav1.GetOptions{})
 	if err != nil {
 		return nil
 	}
@@ -108,4 +127,94 @@ func IsNfs() bool {
 		return false
 	}
 	return true
+}
+
+// UpdateCDIConfigWithOptions updates CDIConfig with specific UpdateOptions
+func UpdateCDIConfigWithOptions(c client.Client, opts metav1.UpdateOptions, updateFunc func(*cdiv1.CDIConfigSpec)) error {
+	cdi, err := controller.GetActiveCDI(c)
+	if err != nil {
+		return err
+	}
+
+	if cdi.Spec.Config == nil {
+		cdi.Spec.Config = &cdiv1.CDIConfigSpec{}
+	}
+
+	updateFunc(cdi.Spec.Config)
+
+	if err = c.Update(context.TODO(), cdi, &client.UpdateOptions{Raw: &opts}); err != nil {
+		return err
+	}
+
+	if err = wait.PollImmediate(1*time.Second, 10*time.Second, func() (bool, error) {
+		cfg := &cdiv1.CDIConfig{}
+		err := c.Get(context.TODO(), types.NamespacedName{Name: "config"}, cfg)
+		return apiequality.Semantic.DeepEqual(&cfg.Spec, cdi.Spec.Config), err
+	}); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// UpdateCDIConfig updates CDIConfig
+func UpdateCDIConfig(c client.Client, updateFunc func(*cdiv1.CDIConfigSpec)) error {
+	return UpdateCDIConfigWithOptions(c, metav1.UpdateOptions{}, updateFunc)
+}
+
+// EnableFeatureGate sets specified FeatureGate in the CDIConfig
+func EnableFeatureGate(c client.Client, feature string) (*bool, error) {
+	var previousValue = false
+
+	if err := UpdateCDIConfig(c, func(config *cdiv1.CDIConfigSpec) {
+		if HasFeature(config, feature) {
+			previousValue = true
+			return
+		}
+
+		config.FeatureGates = append(config.FeatureGates, feature)
+	}); err != nil {
+		return nil, err
+	}
+
+	return &previousValue, nil
+}
+
+// DisableFeatureGate unsets specified FeatureGate in the CDIConfig
+func DisableFeatureGate(c client.Client, featureGate string) (*bool, error) {
+	var previousValue = false
+
+	if err := UpdateCDIConfig(c, func(config *cdiv1.CDIConfigSpec) {
+		if !HasFeature(config, featureGate) {
+			return
+		}
+
+		previousValue = true
+		config.FeatureGates = removeString(config.FeatureGates, featureGate)
+	}); err != nil {
+		return nil, err
+	}
+
+	return &previousValue, nil
+}
+
+func removeString(featureGates []string, featureGate string) []string {
+	var output []string
+	for _, fg := range featureGates {
+		if fg != featureGate {
+			output = append(output, fg)
+		}
+	}
+	return output
+}
+
+// HasFeature - helper to check if specified FeatureGate is in the CDIConfig
+func HasFeature(config *cdiv1.CDIConfigSpec, featureGate string) bool {
+	for _, fg := range config.FeatureGates {
+		if fg == featureGate {
+			return true
+		}
+	}
+
+	return false
 }

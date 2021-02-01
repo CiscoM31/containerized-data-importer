@@ -19,14 +19,10 @@ package controller
 import (
 	"context"
 
-	csiv1 "github.com/kubernetes-csi/external-snapshotter/pkg/apis/volumesnapshot/v1alpha1"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	logf "sigs.k8s.io/controller-runtime/pkg/runtime/log"
-
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,8 +30,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
 )
 
@@ -48,12 +47,12 @@ var _ = Describe("Smart-clone reconcile functions", func() {
 		if annotation != "" {
 			annotations[annotation] = ""
 		}
-		val := &csiv1.VolumeSnapshot{
+		val := &snapshotv1.VolumeSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
 				Annotations: annotations,
 			},
-			Status: csiv1.VolumeSnapshotStatus{
-				ReadyToUse: ready,
+			Status: &snapshotv1.VolumeSnapshotStatus{
+				ReadyToUse: &ready,
 			},
 		}
 		Expect(shouldReconcileSnapshot(val)).To(Equal(expectSuccess))
@@ -131,32 +130,32 @@ var _ = Describe("Smart-clone controller reconcilePVC loop", func() {
 
 	It("Should error if no matching DV can be found", func() {
 		reconciler := createSmartCloneReconciler()
-		_, err := reconciler.reconcilePvc(reconciler.Log, createPVCWithSnapshotSource("test-dv", "invalid"))
+		_, err := reconciler.reconcilePvc(reconciler.log, createPVCWithSnapshotSource("test-dv", "invalid"))
 		Expect(err).To(HaveOccurred())
 		Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("Should update the DV to success and no snapshot should exist after reconcile", func() {
 		reconciler := createSmartCloneReconciler(newCloneDataVolume("test-dv"))
-		_, err := reconciler.reconcilePvc(reconciler.Log, createPVCWithSnapshotSource("test-dv", "test-dv"))
+		_, err := reconciler.reconcilePvc(reconciler.log, createPVCWithSnapshotSource("test-dv", "test-dv"))
 		Expect(err).ToNot(HaveOccurred())
 		By("Checking error event recorded")
 		event := <-reconciler.recorder.(*record.FakeRecorder).Events
 		Expect(event).To(ContainSubstring("Successfully cloned from default/test into default/test-dv"))
-		snapshot := &csiv1.VolumeSnapshot{}
-		err = reconciler.Client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, snapshot)
+		snapshot := &snapshotv1.VolumeSnapshot{}
+		err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, snapshot)
 		Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("Should update the DV to success and no snapshot should exist after reconcile, if snapshot existed", func() {
 		reconciler := createSmartCloneReconciler(newCloneDataVolume("test-dv"), createSnapshotVolume("test-dv", metav1.NamespaceDefault, nil))
-		_, err := reconciler.reconcilePvc(reconciler.Log, createPVCWithSnapshotSource("test-dv", "test-dv"))
+		_, err := reconciler.reconcilePvc(reconciler.log, createPVCWithSnapshotSource("test-dv", "test-dv"))
 		Expect(err).ToNot(HaveOccurred())
 		By("Checking error event recorded")
 		event := <-reconciler.recorder.(*record.FakeRecorder).Events
 		Expect(event).To(ContainSubstring("Successfully cloned from default/test into default/test-dv"))
-		snapshot := &csiv1.VolumeSnapshot{}
-		err = reconciler.Client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, snapshot)
+		snapshot := &snapshotv1.VolumeSnapshot{}
+		err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, snapshot)
 		Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 	})
 })
@@ -174,19 +173,19 @@ var _ = Describe("Smart-clone controller reconcileSnapshot loop", func() {
 
 	It("Should error if no matching DV can be found", func() {
 		reconciler := createSmartCloneReconciler()
-		_, err := reconciler.reconcileSnapshot(reconciler.Log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, nil))
+		_, err := reconciler.reconcileSnapshot(reconciler.log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, nil))
 		Expect(err).To(HaveOccurred())
 		Expect(k8serrors.IsNotFound(err)).To(BeTrue())
 	})
 
 	It("Should error if snapshot has no owner reference, and dv exists", func() {
 		reconciler := createSmartCloneReconciler(newCloneDataVolume("test-dv"))
-		_, err := reconciler.reconcileSnapshot(reconciler.Log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, nil))
+		_, err := reconciler.reconcileSnapshot(reconciler.log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, nil))
 		Expect(err).To(HaveOccurred())
 		Expect(err.Error()).To(ContainSubstring("error creating new pvc from snapshot object, snapshot has no owner"))
 		By("Checking that the DV phase has been marked in progress")
 		datavolume := &cdiv1.DataVolume{}
-		err = reconciler.Client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, datavolume)
+		err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, datavolume)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(datavolume.Status.Phase).To(Equal(cdiv1.SmartClonePVCInProgress))
 		By("Checking error event recorded")
@@ -197,20 +196,20 @@ var _ = Describe("Smart-clone controller reconcileSnapshot loop", func() {
 	It("Should create a new if snapshot has an owner reference, and dv exists", func() {
 		controller := true
 		reconciler := createSmartCloneReconciler(newCloneDataVolume("test-dv"))
-		_, err := reconciler.reconcileSnapshot(reconciler.Log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, &metav1.OwnerReference{
+		_, err := reconciler.reconcileSnapshot(reconciler.log, createSnapshotVolume("test-dv", metav1.NamespaceDefault, &metav1.OwnerReference{
 			Controller: &controller,
 		}))
 		Expect(err).ToNot(HaveOccurred())
 		By("Checking that the DV phase has been marked in progress")
 		datavolume := &cdiv1.DataVolume{}
-		err = reconciler.Client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, datavolume)
+		err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, datavolume)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(datavolume.Status.Phase).To(Equal(cdiv1.SmartClonePVCInProgress))
 		By("Checking error event recorded")
 		event := <-reconciler.recorder.(*record.FakeRecorder).Events
 		Expect(event).To(ContainSubstring("Creating PVC for smart-clone is in progress"))
 		pvc := &corev1.PersistentVolumeClaim{}
-		err = reconciler.Client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, pvc)
+		err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: "test-dv", Namespace: metav1.NamespaceDefault}, pvc)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(pvc.Spec.DataSource).ToNot(BeNil())
 	})
@@ -223,7 +222,7 @@ func createSmartCloneReconciler(objects ...runtime.Object) *SmartCloneReconciler
 	// Register operator types with the runtime scheme.
 	s := scheme.Scheme
 	cdiv1.AddToScheme(s)
-	csiv1.AddToScheme(s)
+	snapshotv1.AddToScheme(s)
 
 	cdiConfig := MakeEmptyCDIConfigSpec(common.ConfigName)
 	cdiConfig.Status = cdiv1.CDIConfigStatus{
@@ -236,9 +235,9 @@ func createSmartCloneReconciler(objects ...runtime.Object) *SmartCloneReconciler
 	rec := record.NewFakeRecorder(1)
 	// Create a ReconcileMemcached object with the scheme and fake client.
 	r := &SmartCloneReconciler{
-		Client:   cl,
-		Scheme:   s,
-		Log:      scLog,
+		client:   cl,
+		scheme:   s,
+		log:      scLog,
 		recorder: rec,
 	}
 	return r
@@ -249,18 +248,18 @@ func createPVCWithSnapshotSource(name, snapshotName string) *corev1.PersistentVo
 	pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{
 		Name:     snapshotName,
 		Kind:     "VolumeSnapshot",
-		APIGroup: &csiv1.SchemeGroupVersion.Group,
+		APIGroup: &snapshotv1.SchemeGroupVersion.Group,
 	}
 	pvc.Status.Phase = corev1.ClaimBound
 	return pvc
 }
 
-func createSnapshotVolume(name, namespace string, owner *metav1.OwnerReference) *csiv1.VolumeSnapshot {
+func createSnapshotVolume(name, namespace string, owner *metav1.OwnerReference) *snapshotv1.VolumeSnapshot {
 	ownerRefs := make([]metav1.OwnerReference, 0)
 	if owner != nil {
 		ownerRefs = append(ownerRefs, *owner)
 	}
-	return &csiv1.VolumeSnapshot{
+	return &snapshotv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       namespace,

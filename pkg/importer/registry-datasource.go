@@ -25,9 +25,8 @@ import (
 
 	"github.com/pkg/errors"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
@@ -40,8 +39,7 @@ const (
 // RegistryDataSource is the struct containing the information needed to import from a registry data source.
 // Sequence of phases:
 // 1. Info -> Transfer
-// 2. Transfer -> Process
-// 3. Process -> Convert (In the process phase the container image layers are extracted, and the url is pointed to the file determined to be the disk image)
+// 2. Transfer -> Convert
 type RegistryDataSource struct {
 	endpoint    string
 	accessKey   string
@@ -71,28 +69,22 @@ func (rd *RegistryDataSource) Info() (ProcessingPhase, error) {
 
 // Transfer is called to transfer the data from the source registry to a temporary location.
 func (rd *RegistryDataSource) Transfer(path string) (ProcessingPhase, error) {
-	if util.GetAvailableSpace(path) <= int64(0) {
-		// Path provided is invalid.
+	size, err := util.GetAvailableSpace(path)
+	if err != nil {
+		return ProcessingPhaseError, err
+	}
+	if size <= int64(0) {
+		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
 	rd.imageDir = filepath.Join(path, containerDiskImageDir)
 
 	klog.V(1).Infof("Copying registry image to scratch space.")
-	err := image.CopyRegistryImage(rd.endpoint, path, containerDiskImageDir, rd.accessKey, rd.secKey, rd.certDir, rd.insecureTLS)
+	err = CopyRegistryImage(rd.endpoint, path, containerDiskImageDir, rd.accessKey, rd.secKey, rd.certDir, rd.insecureTLS)
 	if err != nil {
 		return ProcessingPhaseError, errors.Wrapf(err, "Failed to read registry image")
 	}
 
-	return ProcessingPhaseProcess, nil
-}
-
-// TransferFile is called to transfer the data from the source to the passed in file.
-func (rd *RegistryDataSource) TransferFile(fileName string) (ProcessingPhase, error) {
-	return ProcessingPhaseError, errors.New("Transferfile should not be called")
-}
-
-// Process is called to do any special processing before giving the url to the data back to the processor
-func (rd *RegistryDataSource) Process() (ProcessingPhase, error) {
 	imageFile, err := getImageFileName(rd.imageDir)
 	if err != nil {
 		return ProcessingPhaseError, errors.Wrapf(err, "Cannot locate image file")
@@ -102,6 +94,11 @@ func (rd *RegistryDataSource) Process() (ProcessingPhase, error) {
 	rd.url, _ = url.Parse(filepath.Join(rd.imageDir, imageFile))
 	klog.V(3).Infof("Successfully found file. VM disk image filename is %s", rd.url.String())
 	return ProcessingPhaseConvert, nil
+}
+
+// TransferFile is called to transfer the data from the source to the passed in file.
+func (rd *RegistryDataSource) TransferFile(fileName string) (ProcessingPhase, error) {
+	return ProcessingPhaseError, errors.New("Transferfile should not be called")
 }
 
 // GetURL returns the url that the data processor can use when converting the data.
@@ -132,7 +129,12 @@ func getImageFileName(dir string) (string, error) {
 		return "", errors.New("image file does not exist in image directory - directory is empty")
 	}
 
-	fileinfo := entries[len(entries)-1]
+	if len(entries) > 1 {
+		klog.Errorf("image directory contains more than one file")
+		return "", errors.New("image directory contains more than one file")
+	}
+
+	fileinfo := entries[0]
 	if fileinfo.IsDir() {
 		klog.Errorf("image file does not exist in image directory contains another directory ")
 		return "", errors.New("image directory contains another directory")

@@ -22,6 +22,8 @@ package webhooks
 import (
 	"encoding/json"
 
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
@@ -30,27 +32,29 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	cdiv1alpha1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	cdiclient "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned/fake"
 )
 
 var (
-	block   = cdiv1alpha1.CDIUninstallStrategyBlockUninstallIfWorkloadsExist
-	noBlock = cdiv1alpha1.CDIUninstallStrategyRemoveWorkloads
+	block   = cdiv1.CDIUninstallStrategyBlockUninstallIfWorkloadsExist
+	noBlock = cdiv1.CDIUninstallStrategyRemoveWorkloads
 )
 
 var _ = Describe("CDI Delete Webhook", func() {
 	Context("with CDI admission review", func() {
-		DescribeTable("should accept with no DataVolumes present", func(strategy *cdiv1alpha1.CDIUninstallStrategy, op admissionv1beta1.Operation) {
-			cdi := &cdiv1alpha1.CDI{
+		DescribeTable("should accept with no DataVolumes present", func(strategy *cdiv1.CDIUninstallStrategy, op admissionv1beta1.Operation) {
+			cdi := &cdiv1.CDI{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cdi",
 				},
-				Spec: cdiv1alpha1.CDISpec{
+				Spec: cdiv1.CDISpec{
 					UninstallStrategy: strategy,
 				},
-				Status: cdiv1alpha1.CDIStatus{
-					Phase: cdiv1alpha1.CDIPhaseDeployed,
+				Status: cdiv1.CDIStatus{
+					Status: sdkapi.Status{
+						Phase: sdkapi.PhaseDeployed,
+					},
 				},
 			}
 
@@ -60,8 +64,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 				Request: &admissionv1beta1.AdmissionRequest{
 					Operation: op,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "cdis",
 					},
 					OldObject: runtime.RawExtension{
@@ -80,16 +84,18 @@ var _ = Describe("CDI Delete Webhook", func() {
 			Entry("EMPTY UPDATE", nil, admissionv1beta1.Update),
 		)
 
-		DescribeTable("should accept with DataVolumes present", func(strategy *cdiv1alpha1.CDIUninstallStrategy, op admissionv1beta1.Operation) {
-			cdi := &cdiv1alpha1.CDI{
+		DescribeTable("should accept with DataVolumes present", func(strategy *cdiv1.CDIUninstallStrategy, op admissionv1beta1.Operation) {
+			cdi := &cdiv1.CDI{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cdi",
 				},
-				Spec: cdiv1alpha1.CDISpec{
+				Spec: cdiv1.CDISpec{
 					UninstallStrategy: strategy,
 				},
-				Status: cdiv1alpha1.CDIStatus{
-					Phase: cdiv1alpha1.CDIPhaseDeployed,
+				Status: cdiv1.CDIStatus{
+					Status: sdkapi.Status{
+						Phase: sdkapi.PhaseDeployed,
+					},
 				},
 			}
 
@@ -99,8 +105,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 				Request: &admissionv1beta1.AdmissionRequest{
 					Operation: op,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "cdis",
 					},
 					OldObject: runtime.RawExtension{
@@ -119,15 +125,17 @@ var _ = Describe("CDI Delete Webhook", func() {
 		)
 
 		It("should reject with DataVolumes present", func() {
-			cdi := &cdiv1alpha1.CDI{
+			cdi := &cdiv1.CDI{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cdi",
 				},
-				Spec: cdiv1alpha1.CDISpec{
+				Spec: cdiv1.CDISpec{
 					UninstallStrategy: &block,
 				},
-				Status: cdiv1alpha1.CDIStatus{
-					Phase: cdiv1alpha1.CDIPhaseDeployed,
+				Status: cdiv1.CDIStatus{
+					Status: sdkapi.Status{
+						Phase: sdkapi.PhaseDeployed,
+					},
 				},
 			}
 
@@ -137,8 +145,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 				Request: &admissionv1beta1.AdmissionRequest{
 					Operation: admissionv1beta1.Delete,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "cdis",
 					},
 					OldObject: runtime.RawExtension{
@@ -153,15 +161,17 @@ var _ = Describe("CDI Delete Webhook", func() {
 		})
 
 		It("should reject with DataVolumes present and oldobject not populated", func() {
-			cdi := &cdiv1alpha1.CDI{
+			cdi := &cdiv1.CDI{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cdi",
 				},
-				Spec: cdiv1alpha1.CDISpec{
+				Spec: cdiv1.CDISpec{
 					UninstallStrategy: &block,
 				},
-				Status: cdiv1alpha1.CDIStatus{
-					Phase: cdiv1alpha1.CDIPhaseDeployed,
+				Status: cdiv1.CDIStatus{
+					Status: sdkapi.Status{
+						Phase: sdkapi.PhaseDeployed,
+					},
 				},
 			}
 
@@ -170,8 +180,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 					Operation: admissionv1beta1.Delete,
 					Name:      cdi.Name,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "cdis",
 					},
 				},
@@ -183,15 +193,17 @@ var _ = Describe("CDI Delete Webhook", func() {
 		})
 
 		It("should allow error CDI to be deleted with DataVolumes present", func() {
-			cdi := &cdiv1alpha1.CDI{
+			cdi := &cdiv1.CDI{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cdi",
 				},
-				Spec: cdiv1alpha1.CDISpec{
+				Spec: cdiv1.CDISpec{
 					UninstallStrategy: &block,
 				},
-				Status: cdiv1alpha1.CDIStatus{
-					Phase: cdiv1alpha1.CDIPhaseError,
+				Status: cdiv1.CDIStatus{
+					Status: sdkapi.Status{
+						Phase: sdkapi.PhaseError,
+					},
 				},
 			}
 
@@ -201,8 +213,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 				Request: &admissionv1beta1.AdmissionRequest{
 					Operation: admissionv1beta1.Delete,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "cdis",
 					},
 					OldObject: runtime.RawExtension{
@@ -222,8 +234,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 				Request: &admissionv1beta1.AdmissionRequest{
 					Operation: admissionv1beta1.Delete,
 					Resource: metav1.GroupVersionResource{
-						Group:    cdiv1alpha1.SchemeGroupVersion.Group,
-						Version:  cdiv1alpha1.SchemeGroupVersion.Version,
+						Group:    cdiv1.SchemeGroupVersion.Group,
+						Version:  cdiv1.SchemeGroupVersion.Version,
 						Resource: "datavolumes",
 					},
 					OldObject: runtime.RawExtension{
@@ -239,8 +251,8 @@ var _ = Describe("CDI Delete Webhook", func() {
 	})
 })
 
-func newDataVolumeWithName(name string) *cdiv1alpha1.DataVolume {
-	return &cdiv1alpha1.DataVolume{
+func newDataVolumeWithName(name string) *cdiv1.DataVolume {
+	return &cdiv1.DataVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},

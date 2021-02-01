@@ -20,20 +20,21 @@
 package uploadserver
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"path/filepath"
 	"sync"
 
+	"github.com/golang/snappy"
 	"github.com/pkg/errors"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/importer"
@@ -41,15 +42,6 @@ import (
 )
 
 const (
-	// UploadContentTypeHeader is the header upload clients may use to set the content type explicitly
-	UploadContentTypeHeader = "x-cdi-content-type"
-
-	// FilesystemCloneContentType is the content type when cloning a filesystem
-	FilesystemCloneContentType = "filesystem-clone"
-
-	// BlockdeviceCloneContentType is the content type when cloning a block device
-	BlockdeviceCloneContentType = "blockdevice-clone"
-
 	healthzPort = 8080
 	healthzPath = "/healthz"
 )
@@ -57,52 +49,99 @@ const (
 // UploadServer is the interface to uploadServerApp
 type UploadServer interface {
 	Run() error
+	PreallocationApplied() common.PreallocationStatus
 }
 
 type uploadServerApp struct {
-	bindAddress string
-	bindPort    int
-	destination string
-	tlsKey      string
-	tlsCert     string
-	clientCert  string
-	clientName  string
-	keyFile     string
-	certFile    string
-	imageSize   string
-	mux         *http.ServeMux
-	uploading   bool
-	processing  bool
-	done        bool
-	doneChan    chan struct{}
-	errChan     chan error
-	mutex       sync.Mutex
+	bindAddress          string
+	bindPort             int
+	destination          string
+	tlsKey               string
+	tlsCert              string
+	clientCert           string
+	clientName           string
+	keyFile              string
+	certFile             string
+	imageSize            string
+	filesystemOverhead   float64
+	preallocation        bool
+	mux                  *http.ServeMux
+	uploading            bool
+	processing           bool
+	done                 bool
+	preallocationApplied common.PreallocationStatus
+	doneChan             chan struct{}
+	errChan              chan error
+	mutex                sync.Mutex
 }
+
+type imageReadCloser func(*http.Request) (io.ReadCloser, error)
 
 // may be overridden in tests
 var uploadProcessorFunc = newUploadStreamProcessor
 var uploadProcessorFuncAsync = newAsyncUploadStreamProcessor
 
-// NewUploadServer returns a new instance of uploadServerApp
-func NewUploadServer(bindAddress string, bindPort int, destination, tlsKey, tlsCert, clientCert, clientName, imageSize string) UploadServer {
-	server := &uploadServerApp{
-		bindAddress: bindAddress,
-		bindPort:    bindPort,
-		destination: destination,
-		tlsKey:      tlsKey,
-		tlsCert:     tlsCert,
-		clientCert:  clientCert,
-		clientName:  clientName,
-		imageSize:   imageSize,
-		mux:         http.NewServeMux(),
-		uploading:   false,
-		done:        false,
-		doneChan:    make(chan struct{}),
-		errChan:     make(chan error),
+func bodyReadCloser(r *http.Request) (io.ReadCloser, error) {
+	return r.Body, nil
+}
+
+func formReadCloser(r *http.Request) (io.ReadCloser, error) {
+	multiReader, err := r.MultipartReader()
+	if err != nil {
+		return nil, err
 	}
-	server.mux.HandleFunc(healthzPath, server.healthzHandler)
-	server.mux.HandleFunc(common.UploadPathSync, server.uploadHandler)
-	server.mux.HandleFunc(common.UploadPathAsync, server.uploadHandlerAsync)
+
+	var filePart *multipart.Part
+
+	for {
+		filePart, err = multiReader.NextPart()
+		if err != nil || filePart.FormName() == "file" {
+			break
+		}
+		klog.Infof("Ignoring part %s", filePart.FormName())
+	}
+
+	// multiReader.NextPart() returns io.EOF when read everything
+	if err != nil {
+		return nil, err
+	}
+
+	return filePart, nil
+}
+
+// NewUploadServer returns a new instance of uploadServerApp
+func NewUploadServer(bindAddress string, bindPort int, destination, tlsKey, tlsCert, clientCert, clientName, imageSize string, filesystemOverhead float64, preallocation bool) UploadServer {
+	server := &uploadServerApp{
+		bindAddress:        bindAddress,
+		bindPort:           bindPort,
+		destination:        destination,
+		tlsKey:             tlsKey,
+		tlsCert:            tlsCert,
+		clientCert:         clientCert,
+		clientName:         clientName,
+		filesystemOverhead: filesystemOverhead,
+		preallocation:      preallocation,
+		imageSize:          imageSize,
+		mux:                http.NewServeMux(),
+		uploading:          false,
+		done:               false,
+		doneChan:           make(chan struct{}),
+		errChan:            make(chan error),
+	}
+
+	for _, path := range common.SyncUploadPaths {
+		server.mux.HandleFunc(path, server.uploadHandler(bodyReadCloser))
+	}
+	for _, path := range common.AsyncUploadPaths {
+		server.mux.HandleFunc(path, server.uploadHandlerAsync(bodyReadCloser))
+	}
+	for _, path := range common.SyncUploadFormPaths {
+		server.mux.HandleFunc(path, server.uploadHandler(formReadCloser))
+	}
+	for _, path := range common.AsyncUploadFormPaths {
+		server.mux.HandleFunc(path, server.uploadHandlerAsync(formReadCloser))
+	}
+
 	return server
 }
 
@@ -238,120 +277,145 @@ func (app *uploadServerApp) validateShouldHandleRequest(w http.ResponseWriter, r
 		klog.V(3).Infof("Handling HTTP connection")
 	}
 
-	exit := func() bool {
-		app.mutex.Lock()
-		defer app.mutex.Unlock()
+	app.mutex.Lock()
+	defer app.mutex.Unlock()
 
-		if app.uploading || app.processing {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return true
-		}
-
-		if app.done {
-			w.WriteHeader(http.StatusConflict)
-			return true
-		}
-
-		app.uploading = true
-		return false
-	}()
-
-	if exit {
+	if app.uploading || app.processing {
 		klog.Warning("Got concurrent upload request")
+		w.WriteHeader(http.StatusServiceUnavailable)
 		return false
 	}
+
+	if app.done {
+		klog.Warning("Got upload request after already done")
+		w.WriteHeader(http.StatusConflict)
+		return false
+	}
+
+	app.uploading = true
+
 	return true
 }
 
-func (app *uploadServerApp) uploadHandlerAsync(w http.ResponseWriter, r *http.Request) {
-	if r.Method == "HEAD" {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	if !app.validateShouldHandleRequest(w, r) {
-		return
-	}
-
-	cdiContentType := r.Header.Get(UploadContentTypeHeader)
-
-	klog.Infof("Content type header is %q\n", cdiContentType)
-
-	processor, err := uploadProcessorFuncAsync(r.Body, app.destination, app.imageSize, cdiContentType)
-
-	app.mutex.Lock()
-
-	if err != nil {
-		klog.Errorf("Saving stream failed: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
-		app.uploading = false
-		app.mutex.Unlock()
-		return
-	}
-	defer app.mutex.Unlock()
-
-	app.uploading = false
-	app.processing = true
-
-	// Start processing.
-	go func() {
-		defer close(app.doneChan)
-		if err := processor.ProcessDataResume(); err != nil {
-			klog.Errorf("Error during resumed processing: %v", err)
-			app.errChan <- err
+func (app *uploadServerApp) uploadHandlerAsync(irc imageReadCloser) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "HEAD" {
+			w.WriteHeader(http.StatusOK)
+			return
 		}
+
+		if !app.validateShouldHandleRequest(w, r) {
+			return
+		}
+
+		cdiContentType := r.Header.Get(common.UploadContentTypeHeader)
+
+		klog.Infof("Content type header is %q\n", cdiContentType)
+
+		readCloser, err := irc(r)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+
+		processor, err := uploadProcessorFuncAsync(readCloser, app.destination, app.imageSize, app.filesystemOverhead, app.preallocation, cdiContentType)
+
+		app.mutex.Lock()
+
+		if err != nil {
+			klog.Errorf("Saving stream failed: %s", err)
+			if _, ok := err.(importer.ValidationSizeError); ok {
+				w.WriteHeader(http.StatusBadRequest)
+			} else {
+				w.WriteHeader(http.StatusInternalServerError)
+			}
+			w.Write([]byte(fmt.Sprintf("Saving stream failed: %s", err.Error())))
+			app.uploading = false
+			app.mutex.Unlock()
+			return
+		}
+		defer app.mutex.Unlock()
+
+		app.uploading = false
+		app.processing = true
+
+		// Start processing.
+		go func() {
+			defer close(app.doneChan)
+			if err := processor.ProcessDataResume(); err != nil {
+				klog.Errorf("Error during resumed processing: %v", err)
+				app.errChan <- err
+			}
+			app.mutex.Lock()
+			defer app.mutex.Unlock()
+			app.processing = false
+			app.done = true
+			app.preallocationApplied = processor.PreallocationApplied()
+			klog.Infof("Wrote data to %s", app.destination)
+		}()
+
+		klog.Info("Returning success to caller, continue processing in background")
+	}
+}
+
+func (app *uploadServerApp) uploadHandler(irc imageReadCloser) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !app.validateShouldHandleRequest(w, r) {
+			return
+		}
+
+		cdiContentType := r.Header.Get(common.UploadContentTypeHeader)
+
+		klog.Infof("Content type header is %q\n", cdiContentType)
+
+		readCloser, err := irc(r)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+		}
+
+		app.preallocationApplied, err = uploadProcessorFunc(readCloser, app.destination, app.imageSize, app.filesystemOverhead, app.preallocation, cdiContentType)
+
 		app.mutex.Lock()
 		defer app.mutex.Unlock()
-		app.processing = false
-		app.done = true
-		klog.Infof("Wrote data to %s", app.destination)
-	}()
-	klog.Info("Returning success to caller, continue processing in background")
-}
 
-func (app *uploadServerApp) uploadHandler(w http.ResponseWriter, r *http.Request) {
-	if !app.validateShouldHandleRequest(w, r) {
-		return
-	}
+		if err != nil {
+			klog.Errorf("Saving stream failed: %s", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			app.uploading = false
+			return
+		}
 
-	cdiContentType := r.Header.Get(UploadContentTypeHeader)
-
-	klog.Infof("Content type header is %q\n", cdiContentType)
-
-	err := uploadProcessorFunc(r.Body, app.destination, app.imageSize, cdiContentType)
-
-	app.mutex.Lock()
-	defer app.mutex.Unlock()
-
-	if err != nil {
-		klog.Errorf("Saving stream failed: %s", err)
-		w.WriteHeader(http.StatusInternalServerError)
 		app.uploading = false
-		return
+		app.done = true
+
+		close(app.doneChan)
+
+		klog.Infof("Wrote data to %s", app.destination)
 	}
-
-	app.uploading = false
-	app.done = true
-
-	close(app.doneChan)
-
-	klog.Infof("Wrote data to %s", app.destination)
 }
 
-func newAsyncUploadStreamProcessor(stream io.ReadCloser, dest, imageSize, contentType string) (*importer.DataProcessor, error) {
-	uds := importer.NewAsyncUploadDataSource(stream)
-	processor := importer.NewDataProcessor(uds, dest, common.ImporterVolumePath, common.ScratchDataDir, imageSize)
+func (app *uploadServerApp) PreallocationApplied() common.PreallocationStatus {
+	return app.preallocationApplied
+}
+
+func newAsyncUploadStreamProcessor(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (*importer.DataProcessor, error) {
+	if contentType == common.FilesystemCloneContentType {
+		return nil, fmt.Errorf("async filesystem clone not supported")
+	}
+
+	uds := importer.NewAsyncUploadDataSource(newContentReader(stream, contentType))
+	processor := importer.NewDataProcessor(uds, dest, common.ImporterVolumePath, common.ScratchDataDir, imageSize, filesystemOverhead, preallocation)
 	return processor, processor.ProcessDataWithPause()
 }
 
-func newUploadStreamProcessor(stream io.ReadCloser, dest, imageSize, contentType string) error {
-	if contentType == FilesystemCloneContentType {
-		return filesystemCloneProcessor(stream, common.ImporterVolumePath)
+func newUploadStreamProcessor(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (common.PreallocationStatus, error) {
+	if contentType == common.FilesystemCloneContentType {
+		return "false", filesystemCloneProcessor(stream, common.ImporterVolumePath)
 	}
 
-	uds := importer.NewUploadDataSource(stream)
-	processor := importer.NewDataProcessor(uds, dest, common.ImporterVolumePath, common.ScratchDataDir, imageSize)
-	return processor.ProcessData()
+	uds := importer.NewUploadDataSource(newContentReader(stream, contentType))
+	processor := importer.NewDataProcessor(uds, dest, common.ImporterVolumePath, common.ScratchDataDir, imageSize, filesystemOverhead, preallocation)
+	err := processor.ProcessData()
+	return processor.PreallocationApplied(), err
 }
 
 func filesystemCloneProcessor(stream io.ReadCloser, destDir string) error {
@@ -359,14 +423,21 @@ func filesystemCloneProcessor(stream io.ReadCloser, destDir string) error {
 		return errors.Wrapf(err, "error removing contents of %s", destDir)
 	}
 
-	gzr, err := gzip.NewReader(stream)
-	if err != nil {
-		return errors.Wrap(err, "error creting gzip reader")
-	}
-
-	if err = util.UnArchiveTar(gzr, destDir); err != nil {
+	if err := util.UnArchiveTar(newSnappyReadCloser(stream), destDir); err != nil {
 		return errors.Wrapf(err, "error unarchiving to %s", destDir)
 	}
 
 	return nil
+}
+
+func newContentReader(stream io.ReadCloser, contentType string) io.ReadCloser {
+	if contentType == common.BlockdeviceClone {
+		return newSnappyReadCloser(stream)
+	}
+
+	return stream
+}
+
+func newSnappyReadCloser(stream io.ReadCloser) io.ReadCloser {
+	return ioutil.NopCloser(snappy.NewReader(stream))
 }

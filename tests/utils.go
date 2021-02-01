@@ -2,13 +2,23 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
+	"runtime"
 	"time"
 
+	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+
 	"github.com/onsi/ginkgo"
+
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"kubevirt.io/containerized-data-importer/tests/framework"
 )
@@ -21,7 +31,10 @@ const (
 var (
 	versionRegex           = regexp.MustCompile(`ubernetes .*v(\d+\.\d+\.\d+)`)
 	versionRegexServer     = regexp.MustCompile(`Server Version: .*({.*})`)
-	versionRegexGitVersion = regexp.MustCompile(`GitVersion:"v(\d+\.\d+\.\d+)"`)
+	versionRegexGitVersion = regexp.MustCompile(`GitVersion:"v(\d+\.\d+\.\d+)\+?\S*"`)
+	nodeSelectorTestValue  = map[string]string{"kubernetes.io/arch": runtime.GOARCH}
+	tolerationsTestValue   = []v1.Toleration{{Key: "test", Value: "123"}}
+	affinityTestValue      = &v1.Affinity{}
 )
 
 // CDIFailHandler call ginkgo.Fail with printing the additional information
@@ -43,6 +56,9 @@ func RunKubectlCommand(f *framework.Framework, args ...string) (string, error) {
 		if len(errb.String()) > 0 {
 			return errb.String(), err
 		}
+		// err will not always be nil calling kubectl, this is expected on no results for instance.
+		// still return the value and let the called decide what to do.
+		return string(stdOutBytes), err
 	}
 	return string(stdOutBytes), nil
 }
@@ -106,4 +122,81 @@ func GetKubeVersion(f *framework.Framework) string {
 		return ""
 	}
 	return ""
+}
+
+// TestNodePlacementValues returns a pre-defined set of node placement values for testing purposes.
+// The values chosen are valid, but the pod will likely not be schedulable.
+func TestNodePlacementValues(f *framework.Framework) sdkapi.NodePlacement {
+	nodes, _ := f.K8sClient.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
+	affinityTestValue = &v1.Affinity{
+		NodeAffinity: &v1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+				NodeSelectorTerms: []v1.NodeSelectorTerm{
+					{
+						MatchExpressions: []v1.NodeSelectorRequirement{
+							{Key: "kubernetes.io/hostname", Operator: v1.NodeSelectorOpIn, Values: []string{nodes.Items[0].Name}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	return sdkapi.NodePlacement{
+		NodeSelector: nodeSelectorTestValue,
+		Affinity:     affinityTestValue,
+		Tolerations:  tolerationsTestValue,
+	}
+}
+
+// PodSpecHasTestNodePlacementValues compares if the pod spec has the set of node placement values defined for testing purposes
+func PodSpecHasTestNodePlacementValues(f *framework.Framework, podSpec v1.PodSpec) bool {
+	if !reflect.DeepEqual(podSpec.NodeSelector, nodeSelectorTestValue) {
+		fmt.Printf("mismatched nodeSelectors, podSpec:\n%v\nExpected:\n%v\n", podSpec.NodeSelector, nodeSelectorTestValue)
+		return false
+	}
+	if !reflect.DeepEqual(podSpec.Affinity, affinityTestValue) {
+		fmt.Printf("mismatched affinity, podSpec:\n%v\nExpected:\n%v\n", *podSpec.Affinity, affinityTestValue)
+		return false
+	}
+	foundMatchingTolerations := false
+	for _, toleration := range podSpec.Tolerations {
+		if toleration == tolerationsTestValue[0] {
+			foundMatchingTolerations = true
+		}
+	}
+	if foundMatchingTolerations != true {
+		fmt.Printf("no matching tolerations found. podSpec:\n%v\nExpected:\n%v\n", podSpec.Tolerations, tolerationsTestValue)
+		return false
+	}
+	return true
+}
+
+//IsOpenshift checks if we are on OpenShift platform
+func IsOpenshift(client kubernetes.Interface) bool {
+	//OpenShift 3.X check
+	result := client.Discovery().RESTClient().Get().AbsPath("/oapi/v1").Do(context.TODO())
+	var statusCode int
+	result.StatusCode(&statusCode)
+
+	if result.Error() == nil {
+		// It is OpenShift
+		if statusCode == http.StatusOK {
+			return true
+		}
+	} else {
+		// Got 404 so this is not Openshift 3.X, let's check OpenShift 4
+		result = client.Discovery().RESTClient().Get().AbsPath("/apis/route.openshift.io").Do(context.TODO())
+		var statusCode int
+		result.StatusCode(&statusCode)
+
+		if result.Error() == nil {
+			// It is OpenShift
+			if statusCode == http.StatusOK {
+				return true
+			}
+		}
+	}
+
+	return false
 }

@@ -30,7 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	cdicorev1alpha1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	cdiuploadv1alpha1 "kubevirt.io/containerized-data-importer/pkg/apis/upload/v1alpha1"
+	cdicorev1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	cdiuploadv1 "kubevirt.io/containerized-data-importer/pkg/apis/upload/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/operator/resources/utils"
 )
 
@@ -48,7 +49,8 @@ func createStaticAPIServerResources(args *FactoryArgs) []runtime.Object {
 
 func createDynamicAPIServerResources(args *FactoryArgs) []runtime.Object {
 	return []runtime.Object{
-		createAPIService(args.Namespace, args.Client, args.Logger),
+		createAPIService("v1beta1", args.Namespace, args.Client, args.Logger),
+		createAPIService("v1alpha1", args.Namespace, args.Client, args.Logger),
 		createDataVolumeValidatingWebhook(args.Namespace, args.Client, args.Logger),
 		createDataVolumeMutatingWebhook(args.Namespace, args.Client, args.Logger),
 		createCDIValidatingWebhook(args.Namespace, args.Client, args.Logger),
@@ -128,14 +130,14 @@ func getAPIServerClusterPolicyRules() []rbacv1.PolicyRule {
 	}
 }
 
-func createAPIService(namespace string, c client.Client, l logr.Logger) *apiregistrationv1beta1.APIService {
+func createAPIService(version, namespace string, c client.Client, l logr.Logger) *apiregistrationv1beta1.APIService {
 	apiService := &apiregistrationv1beta1.APIService{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apiregistration.k8s.io/v1beta1",
 			Kind:       "APIService",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: fmt.Sprintf("%s.%s", cdiuploadv1alpha1.SchemeGroupVersion.Version, cdiuploadv1alpha1.SchemeGroupVersion.Group),
+			Name: fmt.Sprintf("%s.%s", version, cdiuploadv1.SchemeGroupVersion.Group),
 			Labels: map[string]string{
 				utils.CDILabel: apiServerServiceName,
 			},
@@ -145,8 +147,8 @@ func createAPIService(namespace string, c client.Client, l logr.Logger) *apiregi
 				Namespace: namespace,
 				Name:      apiServerServiceName,
 			},
-			Group:                cdiuploadv1alpha1.SchemeGroupVersion.Group,
-			Version:              cdiuploadv1alpha1.SchemeGroupVersion.Version,
+			Group:                cdiuploadv1.SchemeGroupVersion.Group,
+			Version:              version,
 			GroupPriorityMinimum: 1000,
 			VersionPriority:      15,
 		},
@@ -166,7 +168,11 @@ func createAPIService(namespace string, c client.Client, l logr.Logger) *apiregi
 
 func createDataVolumeValidatingWebhook(namespace string, c client.Client, l logr.Logger) *admissionregistrationv1beta1.ValidatingWebhookConfiguration {
 	path := "/datavolume-validate"
+	defaultServicePort := int32(443)
+	allScopes := admissionregistrationv1beta1.AllScopes
+	exactPolicy := admissionregistrationv1beta1.Exact
 	failurePolicy := admissionregistrationv1beta1.Fail
+	defaultTimeoutSeconds := int32(30)
 	sideEffect := admissionregistrationv1beta1.SideEffectClassNone
 	whc := &admissionregistrationv1beta1.ValidatingWebhookConfiguration{
 		TypeMeta: metav1.TypeMeta{
@@ -188,9 +194,13 @@ func createDataVolumeValidatingWebhook(namespace string, c client.Client, l logr
 						admissionregistrationv1beta1.Update,
 					},
 					Rule: admissionregistrationv1beta1.Rule{
-						APIGroups:   []string{cdicorev1alpha1.SchemeGroupVersion.Group},
-						APIVersions: []string{cdicorev1alpha1.SchemeGroupVersion.Version},
-						Resources:   []string{"datavolumes"},
+						APIGroups: []string{cdicorev1.SchemeGroupVersion.Group},
+						APIVersions: []string{
+							cdicorev1.SchemeGroupVersion.Version,
+							cdicorev1alpha1.SchemeGroupVersion.Version,
+						},
+						Resources: []string{"datavolumes"},
+						Scope:     &allScopes,
 					},
 				}},
 				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
@@ -198,10 +208,18 @@ func createDataVolumeValidatingWebhook(namespace string, c client.Client, l logr
 						Namespace: namespace,
 						Name:      apiServerServiceName,
 						Path:      &path,
+						Port:      &defaultServicePort,
 					},
 				},
-				FailurePolicy: &failurePolicy,
-				SideEffects:   &sideEffect,
+				FailurePolicy:     &failurePolicy,
+				SideEffects:       &sideEffect,
+				MatchPolicy:       &exactPolicy,
+				NamespaceSelector: &metav1.LabelSelector{},
+				TimeoutSeconds:    &defaultTimeoutSeconds,
+				AdmissionReviewVersions: []string{
+					"v1beta1",
+				},
+				ObjectSelector: &metav1.LabelSelector{},
 			},
 		},
 	}
@@ -220,8 +238,12 @@ func createDataVolumeValidatingWebhook(namespace string, c client.Client, l logr
 
 func createCDIValidatingWebhook(namespace string, c client.Client, l logr.Logger) *admissionregistrationv1beta1.ValidatingWebhookConfiguration {
 	path := "/cdi-validate"
-	failurePolicy := admissionregistrationv1beta1.Fail
 	sideEffect := admissionregistrationv1beta1.SideEffectClassNone
+	defaultServicePort := int32(443)
+	allScopes := admissionregistrationv1beta1.AllScopes
+	exactPolicy := admissionregistrationv1beta1.Exact
+	failurePolicy := admissionregistrationv1beta1.Fail
+	defaultTimeoutSeconds := int32(30)
 	whc := &admissionregistrationv1beta1.ValidatingWebhookConfiguration{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "admissionregistration.k8s.io/v1beta1",
@@ -241,9 +263,13 @@ func createCDIValidatingWebhook(namespace string, c client.Client, l logr.Logger
 						admissionregistrationv1beta1.Delete,
 					},
 					Rule: admissionregistrationv1beta1.Rule{
-						APIGroups:   []string{cdicorev1alpha1.SchemeGroupVersion.Group},
-						APIVersions: []string{cdicorev1alpha1.SchemeGroupVersion.Version},
-						Resources:   []string{"cdis"},
+						APIGroups: []string{cdicorev1.SchemeGroupVersion.Group},
+						APIVersions: []string{
+							cdicorev1.SchemeGroupVersion.Version,
+							cdicorev1alpha1.SchemeGroupVersion.Version,
+						},
+						Resources: []string{"cdis"},
+						Scope:     &allScopes,
 					},
 				}},
 				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
@@ -251,9 +277,18 @@ func createCDIValidatingWebhook(namespace string, c client.Client, l logr.Logger
 						Namespace: namespace,
 						Name:      apiServerServiceName,
 						Path:      &path,
+						Port:      &defaultServicePort,
 					},
 				},
-				SideEffects: &sideEffect,
+				SideEffects:       &sideEffect,
+				FailurePolicy:     &failurePolicy,
+				MatchPolicy:       &exactPolicy,
+				NamespaceSelector: &metav1.LabelSelector{},
+				TimeoutSeconds:    &defaultTimeoutSeconds,
+				AdmissionReviewVersions: []string{
+					"v1beta1",
+				},
+				ObjectSelector: &metav1.LabelSelector{},
 			},
 		},
 	}
@@ -275,7 +310,12 @@ func createCDIValidatingWebhook(namespace string, c client.Client, l logr.Logger
 
 func createDataVolumeMutatingWebhook(namespace string, c client.Client, l logr.Logger) *admissionregistrationv1beta1.MutatingWebhookConfiguration {
 	path := "/datavolume-mutate"
+	defaultServicePort := int32(443)
+	allScopes := admissionregistrationv1beta1.AllScopes
+	exactPolicy := admissionregistrationv1beta1.Exact
 	failurePolicy := admissionregistrationv1beta1.Fail
+	defaultTimeoutSeconds := int32(30)
+	reinvocationNever := admissionregistrationv1beta1.NeverReinvocationPolicy
 	sideEffect := admissionregistrationv1beta1.SideEffectClassNone
 	whc := &admissionregistrationv1beta1.MutatingWebhookConfiguration{
 		TypeMeta: metav1.TypeMeta{
@@ -297,9 +337,13 @@ func createDataVolumeMutatingWebhook(namespace string, c client.Client, l logr.L
 						admissionregistrationv1beta1.Update,
 					},
 					Rule: admissionregistrationv1beta1.Rule{
-						APIGroups:   []string{cdicorev1alpha1.SchemeGroupVersion.Group},
-						APIVersions: []string{cdicorev1alpha1.SchemeGroupVersion.Version},
-						Resources:   []string{"datavolumes"},
+						APIGroups: []string{cdicorev1.SchemeGroupVersion.Group},
+						APIVersions: []string{
+							cdicorev1.SchemeGroupVersion.Version,
+							cdicorev1alpha1.SchemeGroupVersion.Version,
+						},
+						Resources: []string{"datavolumes"},
+						Scope:     &allScopes,
 					},
 				}},
 				ClientConfig: admissionregistrationv1beta1.WebhookClientConfig{
@@ -307,10 +351,19 @@ func createDataVolumeMutatingWebhook(namespace string, c client.Client, l logr.L
 						Namespace: namespace,
 						Name:      apiServerServiceName,
 						Path:      &path,
+						Port:      &defaultServicePort,
 					},
 				},
-				FailurePolicy: &failurePolicy,
-				SideEffects:   &sideEffect,
+				FailurePolicy:     &failurePolicy,
+				SideEffects:       &sideEffect,
+				MatchPolicy:       &exactPolicy,
+				NamespaceSelector: &metav1.LabelSelector{},
+				TimeoutSeconds:    &defaultTimeoutSeconds,
+				AdmissionReviewVersions: []string{
+					"v1beta1",
+				},
+				ObjectSelector:     &metav1.LabelSelector{},
+				ReinvocationPolicy: &reinvocationNever,
 			},
 		},
 	}
@@ -346,11 +399,9 @@ func getAPIServerCABundle(namespace string, c client.Client, l logr.Logger) []by
 }
 
 func createAPIServerClusterRoleBinding(namespace string) *rbacv1.ClusterRoleBinding {
-	return CreateClusterRoleBinding(apiServerResourceName, apiServerResourceName, apiServerResourceName, namespace)
+	return utils.ResourcesBuiler.CreateClusterRoleBinding(apiServerResourceName, apiServerResourceName, apiServerResourceName, namespace)
 }
 
 func createAPIServerClusterRole() *rbacv1.ClusterRole {
-	clusterRole := CreateClusterRole(apiServerResourceName)
-	clusterRole.Rules = getAPIServerClusterPolicyRules()
-	return clusterRole
+	return utils.ResourcesBuiler.CreateClusterRole(apiServerResourceName, getAPIServerClusterPolicyRules())
 }

@@ -1,12 +1,14 @@
 package utils
 
 import (
+	"context"
+
 	"github.com/pkg/errors"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // WaitForDeploymentReplicasReadyOrDie adds the ability to fatal out if the replicas don't become ready
@@ -19,7 +21,7 @@ func WaitForDeploymentReplicasReadyOrDie(c *kubernetes.Clientset, namespace, nam
 // WaitForDeploymentReplicasReady will wait for replicase to become ready and return an error if they do not
 func WaitForDeploymentReplicasReady(c *kubernetes.Clientset, namespace, name string) error {
 	return wait.PollImmediate(defaultPollInterval, defaultPollPeriod, func() (done bool, err error) {
-		dep, err := c.AppsV1().Deployments(namespace).Get(name, metav1.GetOptions{})
+		dep, err := c.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
 		// Fail if deployment not found, ignore other (possibly intermittent) API errors
 		if apierrs.IsNotFound(err) {
 			return true, err

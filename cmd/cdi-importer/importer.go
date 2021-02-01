@@ -23,8 +23,9 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/klog"
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	"k8s.io/klog/v2"
+
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/pkg/image"
@@ -56,8 +57,17 @@ func main() {
 	contentType, _ := util.ParseEnvVar(common.ImporterContentType, false)
 	imageSize, _ := util.ParseEnvVar(common.ImporterImageSize, false)
 	certDir, _ := util.ParseEnvVar(common.ImporterCertDirVar, false)
+	filesystemOverhead, _ := strconv.ParseFloat(os.Getenv(common.FilesystemOverheadVar), 64)
 	insecureTLS, _ := strconv.ParseBool(os.Getenv(common.InsecureTLSVar))
 	diskID, _ := util.ParseEnvVar(common.ImporterDiskID, false)
+	uuid, _ := util.ParseEnvVar(common.ImporterUUID, false)
+	backingFile, _ := util.ParseEnvVar(common.ImporterBackingFile, false)
+	thumbprint, _ := util.ParseEnvVar(common.ImporterThumbprint, false)
+	currentCheckpoint, _ := util.ParseEnvVar(common.ImporterCurrentCheckpoint, false)
+	previousCheckpoint, _ := util.ParseEnvVar(common.ImporterPreviousCheckpoint, false)
+	finalCheckpoint, _ := util.ParseEnvVar(common.ImporterFinalCheckpoint, false)
+	preallocation, err := strconv.ParseBool(os.Getenv(common.Preallocation))
+	var preallocationApplied common.PreallocationStatus
 
 	//Registry import currently support kubevirt content type only
 	if contentType != string(cdiv1.DataVolumeKubeVirt) && (source == controller.SourceRegistry || source == controller.SourceImageio) {
@@ -80,18 +90,39 @@ func main() {
 	}
 
 	dataDir := common.ImporterDataDir
-	availableDestSpace := util.GetAvailableSpaceByVolumeMode(volumeMode)
+	availableDestSpace, err := util.GetAvailableSpaceByVolumeMode(volumeMode)
+	if err != nil {
+		klog.Errorf("%+v", err)
+		os.Exit(1)
+	}
 	if source == controller.SourceNone && contentType == string(cdiv1.DataVolumeKubeVirt) {
 		requestImageSizeQuantity := resource.MustParse(imageSize)
 		minSizeQuantity := util.MinQuantity(resource.NewScaledQuantity(availableDestSpace, 0), &requestImageSizeQuantity)
+		preallocationApplied = common.PreallocationStatusFromBool(preallocation)
 		if minSizeQuantity.Cmp(requestImageSizeQuantity) != 0 {
 			// Available dest space is smaller than the size we want to create
 			klog.Warningf("Available space less than requested size, creating blank image sized to available space: %s.\n", minSizeQuantity.String())
+			if preallocation {
+				preallocationApplied = common.PreallocationSkipped
+				preallocation = false
+			}
 		}
-		err := image.CreateBlankImage(common.ImporterWritePath, minSizeQuantity)
+
+		var err error
+		if volumeMode == v1.PersistentVolumeFilesystem {
+			err = image.CreateBlankImage(common.ImporterWritePath, minSizeQuantity, preallocation)
+		} else if volumeMode == v1.PersistentVolumeBlock && preallocation {
+			klog.V(1).Info("Preallocating blank block volume")
+			err = image.PreallocateBlankBlock(common.WriteBlockPath, minSizeQuantity)
+		}
+
 		if err != nil {
 			klog.Errorf("%+v", err)
-			err = util.WriteTerminationMessage(fmt.Sprintf("Unable to create blank image: %+v", err))
+			message := fmt.Sprintf("Unable to create blank image: %+v", err)
+			if preallocationApplied == common.PreallocationSkipped {
+				message += ", " + controller.PreallocationSkipped
+			}
+			err = util.WriteTerminationMessage(message)
 			if err != nil {
 				klog.Errorf("%+v", err)
 			}
@@ -140,6 +171,16 @@ func main() {
 				}
 				os.Exit(1)
 			}
+		case controller.SourceVDDK:
+			dp, err = importer.NewVDDKDataSource(ep, acc, sec, thumbprint, uuid, backingFile, currentCheckpoint, previousCheckpoint, finalCheckpoint, volumeMode)
+			if err != nil {
+				klog.Errorf("%+v", err)
+				err = util.WriteTerminationMessage(fmt.Sprintf("Unable to connect to vddk data source: %+v", err))
+				if err != nil {
+					klog.Errorf("%+v", err)
+				}
+				os.Exit(1)
+			}
 		default:
 			klog.Errorf("Unknown source type %s\n", source)
 			err = util.WriteTerminationMessage(fmt.Sprintf("Unknown data source: %s", source))
@@ -149,7 +190,7 @@ func main() {
 			os.Exit(1)
 		}
 		defer dp.Close()
-		processor := importer.NewDataProcessor(dp, dest, dataDir, common.ScratchDataDir, imageSize)
+		processor := importer.NewDataProcessor(dp, dest, dataDir, common.ScratchDataDir, imageSize, filesystemOverhead, preallocation)
 		err = processor.ProcessData()
 		if err != nil {
 			klog.Errorf("%+v", err)
@@ -162,11 +203,19 @@ func main() {
 			}
 			os.Exit(1)
 		}
+		preallocationApplied = processor.PreallocationApplied()
 	}
-	err = util.WriteTerminationMessage("Import Complete")
+	message := "Import Complete"
+	switch preallocationApplied {
+	case common.PreallocationApplied:
+		message += ", " + controller.PreallocationApplied
+	case common.PreallocationSkipped:
+		message += ", " + controller.PreallocationSkipped
+	}
+	err = util.WriteTerminationMessage(message)
 	if err != nil {
 		klog.Errorf("%+v", err)
 		os.Exit(1)
 	}
-	klog.V(1).Infoln("Import complete")
+	klog.V(1).Infoln(message)
 }

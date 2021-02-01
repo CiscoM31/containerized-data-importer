@@ -24,9 +24,12 @@ import (
 	"os"
 	"strconv"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
+	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/pkg/uploadserver"
+	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
 const (
@@ -48,6 +51,9 @@ func main() {
 
 	destination := getDestination()
 
+	filesystemOverhead, _ := strconv.ParseFloat(os.Getenv(common.FilesystemOverheadVar), 64)
+	preallocation, _ := strconv.ParseBool(os.Getenv(common.Preallocation))
+
 	server := uploadserver.NewUploadServer(
 		listenAddress,
 		listenPort,
@@ -57,6 +63,8 @@ func main() {
 		os.Getenv("CLIENT_CERT"),
 		os.Getenv("CLIENT_NAME"),
 		os.Getenv(common.UploadImageSize),
+		filesystemOverhead,
+		preallocation,
 	)
 
 	klog.Infof("Upload destination: %s", destination)
@@ -69,6 +77,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Check if cloning or uploading based on the existance of the scratch space. Clone won't have scratch space
+	clone := false
+	_, err = os.OpenFile(common.ScratchDataDir, os.O_RDONLY, 0600)
+	if err != nil {
+		// Cloning instead of uploading.
+		clone = true
+	}
+	var message string
+	if clone {
+		message = "Clone Complete"
+	} else {
+		message = "Upload Complete"
+	}
+	switch server.PreallocationApplied() {
+	case "true":
+		message += ", " + controller.PreallocationApplied
+	case "skipped":
+		message += ", " + controller.PreallocationSkipped
+	}
+	err = util.WriteTerminationMessage(message)
+	if err != nil {
+		klog.Errorf("%+v", err)
+		os.Exit(1)
+	}
 	klog.Info("UploadServer successfully exited")
 }
 

@@ -19,11 +19,14 @@ package importer
 import (
 	"fmt"
 	"net/url"
+	"os"
 
 	"github.com/pkg/errors"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
+	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
@@ -42,13 +45,15 @@ const (
 	ProcessingPhaseTransferDataDir ProcessingPhase = "TransferDataDir"
 	// ProcessingPhaseTransferDataFile is the phase in which the data source writes data directly to the target file without conversion.
 	ProcessingPhaseTransferDataFile ProcessingPhase = "TransferDataFile"
-	// ProcessingPhaseProcess is the phase in which the data source processes the data just written to the scratch space.
-	ProcessingPhaseProcess ProcessingPhase = "Process"
+	// ProcessingPhaseValidatePause is the phase in which the data processor should validate and then pause.
+	ProcessingPhaseValidatePause ProcessingPhase = "ValidatePause"
 	// ProcessingPhaseConvert is the phase in which the data is taken from the url provided by the source, and it is converted to the target RAW disk image format.
 	// The url can be an http end point or file system end point.
 	ProcessingPhaseConvert ProcessingPhase = "Convert"
 	// ProcessingPhaseResize the disk image, this is only needed when the target contains a file system (block device do not need a resize)
 	ProcessingPhaseResize ProcessingPhase = "Resize"
+	// ProcessingPhasePreallocate is the step to preallocate the file after resize
+	ProcessingPhasePreallocate ProcessingPhase = "Preallocate"
 	// ProcessingPhaseComplete is the phase where the entire process completed successfully and we can exit gracefully.
 	ProcessingPhaseComplete ProcessingPhase = "Complete"
 	// ProcessingPhasePause is the phase where we pause processing and end the loop, and expect something to call the process loop again.
@@ -56,6 +61,13 @@ const (
 	// ProcessingPhaseError is the phase in which we encountered an error and need to exit ungracefully.
 	ProcessingPhaseError ProcessingPhase = "Error"
 )
+
+// ValidationSizeError is an error indication size validation failure.
+type ValidationSizeError struct {
+	err error
+}
+
+func (e ValidationSizeError) Error() string { return e.err.Error() }
 
 // ErrRequiresScratchSpace indicates that we require scratch space.
 var ErrRequiresScratchSpace = fmt.Errorf("scratch space required and none found")
@@ -75,8 +87,6 @@ type DataSourceInterface interface {
 	Transfer(path string) (ProcessingPhase, error)
 	// TransferFile is called to transfer the data from the source to the file passed in.
 	TransferFile(fileName string) (ProcessingPhase, error)
-	// Process is called to do any special processing before giving the url to the data back to the processor
-	Process() (ProcessingPhase, error)
 	// Geturl returns the url that the data processor can use when converting the data.
 	GetURL() *url.URL
 	// Close closes any readers or other open resources.
@@ -105,17 +115,35 @@ type DataProcessor struct {
 	requestImageSize string
 	// available space is the available space before downloading the image
 	availableSpace int64
+	// storage overhead is the amount of overhead of the storage used
+	filesystemOverhead float64
+	// needsDataCleanup decides if the contents of the data directory should be deleted (need to avoid this during delta copy stages in a warm migration)
+	needsDataCleanup bool
+	// preallocation is the flag controlling preallocation setting of qemu-img
+	preallocation bool
+	// preallocationApplied is used to pass information whether preallocation has been performed, skipped or not attempted
+	// "skipped" is used to indicate that preallocation would have been perfomed but there was not enough space, so the
+	// preallocation whould have failed.
+	preallocationApplied common.PreallocationStatus
 }
 
 // NewDataProcessor create a new instance of a data processor using the passed in data provider.
-func NewDataProcessor(dataSource DataSourceInterface, dataFile, dataDir, scratchDataDir, requestImageSize string) *DataProcessor {
+func NewDataProcessor(dataSource DataSourceInterface, dataFile, dataDir, scratchDataDir, requestImageSize string, filesystemOverhead float64, preallocation bool) *DataProcessor {
+	needsDataCleanup := true
+	vddkSource, isVddk := dataSource.(*VDDKDataSource)
+	if isVddk {
+		needsDataCleanup = !vddkSource.IsDeltaCopy()
+	}
 	dp := &DataProcessor{
-		currentPhase:     ProcessingPhaseInfo,
-		source:           dataSource,
-		dataFile:         dataFile,
-		dataDir:          dataDir,
-		scratchDataDir:   scratchDataDir,
-		requestImageSize: requestImageSize,
+		currentPhase:       ProcessingPhaseInfo,
+		source:             dataSource,
+		dataFile:           dataFile,
+		dataDir:            dataDir,
+		scratchDataDir:     scratchDataDir,
+		requestImageSize:   requestImageSize,
+		filesystemOverhead: filesystemOverhead,
+		needsDataCleanup:   needsDataCleanup,
+		preallocation:      preallocation,
 	}
 	// Calculate available space before doing anything.
 	dp.availableSpace = dp.calculateTargetSize()
@@ -124,7 +152,7 @@ func NewDataProcessor(dataSource DataSourceInterface, dataFile, dataDir, scratch
 
 // ProcessData is the main synchronous processing loop
 func (dp *DataProcessor) ProcessData() error {
-	if util.GetAvailableSpace(dp.scratchDataDir) > int64(0) {
+	if size, _ := util.GetAvailableSpace(dp.scratchDataDir); size > int64(0) {
 		// Clean up before trying to write, in case a previous attempt left a mess. Note the deferred cleanup is intentional.
 		if err := CleanDir(dp.scratchDataDir); err != nil {
 			return errors.Wrap(err, "Failure cleaning up temporary scratch space")
@@ -132,7 +160,8 @@ func (dp *DataProcessor) ProcessData() error {
 		// Attempt to be a good citizen and clean up my mess at the end.
 		defer CleanDir(dp.scratchDataDir)
 	}
-	if util.GetAvailableSpace(dp.dataDir) > int64(0) {
+
+	if size, _ := util.GetAvailableSpace(dp.dataDir); size > int64(0) && dp.needsDataCleanup {
 		// Clean up data dir before trying to write in case a previous attempt failed and left some stuff behind.
 		if err := CleanDir(dp.dataDir); err != nil {
 			return errors.Wrap(err, "Failure cleaning up target space")
@@ -180,11 +209,13 @@ func (dp *DataProcessor) ProcessDataWithPause() error {
 			if err != nil {
 				err = errors.Wrap(err, "Unable to transfer source data to target file")
 			}
-		case ProcessingPhaseProcess:
-			dp.currentPhase, err = dp.source.Process()
-			if err != nil {
-				err = errors.Wrap(err, "Unable to process source data to intermediate state before transferring to target")
+		case ProcessingPhaseValidatePause:
+			validateErr := dp.validate(dp.source.GetURL())
+			if validateErr != nil {
+				dp.currentPhase = ProcessingPhaseError
+				err = validateErr
 			}
+			dp.currentPhase = ProcessingPhasePause
 		case ProcessingPhaseConvert:
 			dp.currentPhase, err = dp.convert(dp.source.GetURL())
 			if err != nil {
@@ -194,6 +225,11 @@ func (dp *DataProcessor) ProcessDataWithPause() error {
 			dp.currentPhase, err = dp.resize()
 			if err != nil {
 				err = errors.Wrap(err, "Unable to resize disk image to requested size")
+			}
+		case ProcessingPhasePreallocate:
+			dp.currentPhase, err = dp.preallocate()
+			if err != nil {
+				err = errors.Wrap(err, "Unable to preallocate disk image to requested size")
 			}
 		default:
 			return errors.Errorf("Unknown processing phase %s", dp.currentPhase)
@@ -209,9 +245,9 @@ func (dp *DataProcessor) ProcessDataWithPause() error {
 
 func (dp *DataProcessor) validate(url *url.URL) error {
 	klog.V(1).Infoln("Validating image")
-	err := qemuOperations.Validate(url, dp.availableSpace)
+	err := qemuOperations.Validate(url, dp.availableSpace, dp.filesystemOverhead)
 	if err != nil {
-		return errors.Wrap(err, "Image validation failed")
+		return ValidationSizeError{err: err}
 	}
 	return nil
 }
@@ -223,65 +259,122 @@ func (dp *DataProcessor) convert(url *url.URL) (ProcessingPhase, error) {
 		return ProcessingPhaseError, err
 	}
 	klog.V(3).Infoln("Converting to Raw")
-	err = qemuOperations.ConvertToRawStream(url, dp.dataFile)
+	err = qemuOperations.ConvertToRawStream(url, dp.dataFile, dp.preallocation)
 	if err != nil {
 		return ProcessingPhaseError, errors.Wrap(err, "Conversion to Raw failed")
 	}
+	dp.preallocationApplied = common.PreallocationStatusFromBool(dp.preallocation)
 
 	return ProcessingPhaseResize, nil
 }
 
 func (dp *DataProcessor) resize() (ProcessingPhase, error) {
-	// Resize only if we have a resize request, and if the image is on a file system pvc.
-	klog.V(3).Infof("Available space in dataFile: %d", getAvailableSpaceBlockFunc(dp.dataFile))
-	if dp.requestImageSize != "" && getAvailableSpaceBlockFunc(dp.dataFile) < int64(0) {
-		klog.V(3).Infoln("Resizing image")
-		err := ResizeImage(dp.dataFile, dp.requestImageSize, dp.availableSpace)
+	size, _ := getAvailableSpaceBlockFunc(dp.dataFile)
+	klog.V(3).Infof("Available space in dataFile: %d", size)
+	isBlockDev := size >= int64(0)
+	shouldPreallocate := false
+	if !isBlockDev {
+		if dp.requestImageSize != "" {
+			var err error
+			klog.V(3).Infoln("Resizing image")
+			shouldPreallocate, err = ResizeImage(dp.dataFile, dp.requestImageSize, dp.getUsableSpace())
+			if err != nil {
+				return ProcessingPhaseError, errors.Wrap(err, "Resize of image failed")
+			}
+		}
+		// Validate that a sparse file will fit even as it fills out.
+		dataFileURL, err := url.Parse(dp.dataFile)
 		if err != nil {
-			return ProcessingPhaseError, errors.Wrap(err, "Resize of image failed")
+			return ProcessingPhaseError, err
+		}
+		err = dp.validate(dataFileURL)
+		if err != nil {
+			return ProcessingPhaseError, err
 		}
 	}
+	if dp.dataFile != "" {
+		// Change permissions to 0660
+		err := os.Chmod(dp.dataFile, 0660)
+		if err != nil {
+			err = errors.Wrap(err, "Unable to change permissions of target file")
+		}
+	}
+	if dp.preallocation {
+		if shouldPreallocate {
+			return ProcessingPhasePreallocate, nil
+		}
+		dp.preallocationApplied = common.PreallocationSkipped // qemu did not preallicate space for a resized file
+	}
+	return ProcessingPhaseComplete, nil
+}
+
+func (dp *DataProcessor) preallocate() (ProcessingPhase, error) {
+	if !dp.preallocation {
+		klog.V(3).Infoln("Preallocation not needed")
+		return ProcessingPhaseComplete, nil
+	}
+
+	klog.V(3).Infoln("Preallocating")
+	// Preallocation is implemented as a copy from file to itself
+	destURL, _ := url.Parse(dp.dataFile)
+	err := qemuOperations.ConvertToRawStream(destURL, dp.dataFile, dp.preallocation)
+	if err != nil {
+		return ProcessingPhaseError, errors.Wrap(err, "Preallocation or resized image failed")
+	}
+	dp.preallocationApplied = common.PreallocationApplied
+
 	return ProcessingPhaseComplete, nil
 }
 
 // ResizeImage resizes the images to match the requested size. Sometimes provisioners misbehave and the available space
 // is not the same as the requested space. For those situations we compare the available space to the requested space and
 // use the smallest of the two values.
-func ResizeImage(dataFile, imageSize string, totalTargetSpace int64) error {
+func ResizeImage(dataFile, imageSize string, totalTargetSpace int64) (bool, error) {
 	dataFileURL, _ := url.Parse(dataFile)
 	info, err := qemuOperations.Info(dataFileURL)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if imageSize != "" {
+		shouldPreallocate := true
 		currentImageSizeQuantity := resource.NewScaledQuantity(info.VirtualSize, 0)
 		newImageSizeQuantity := resource.MustParse(imageSize)
 		minSizeQuantity := util.MinQuantity(resource.NewScaledQuantity(totalTargetSpace, 0), &newImageSizeQuantity)
 		if minSizeQuantity.Cmp(newImageSizeQuantity) != 0 {
 			// Available destination space is smaller than the size we want to resize to
 			klog.Warningf("Available space less than requested size, resizing image to available space %s.\n", minSizeQuantity.String())
+			shouldPreallocate = false
 		}
 		if currentImageSizeQuantity.Cmp(minSizeQuantity) == 0 {
 			klog.V(1).Infof("No need to resize image. Requested size: %s, Image size: %d.\n", imageSize, info.VirtualSize)
-			return nil
+			return false, nil
 		}
 		klog.V(1).Infof("Expanding image size to: %s\n", minSizeQuantity.String())
-		return qemuOperations.Resize(dataFile, minSizeQuantity)
+		err := qemuOperations.Resize(dataFile, minSizeQuantity)
+		return err == nil && shouldPreallocate, err
 	}
-	return errors.New("Image resize called with blank resize")
+	return false, errors.New("Image resize called with blank resize")
 }
 
 func (dp *DataProcessor) calculateTargetSize() int64 {
 	klog.V(1).Infof("Calculating available size\n")
 	var targetQuantity *resource.Quantity
-	if getAvailableSpaceBlockFunc(dp.dataFile) >= int64(0) {
+	size, err := getAvailableSpaceBlockFunc(dp.dataFile)
+	if err != nil {
+		klog.Error(err)
+	}
+	if size >= int64(0) {
 		// Block volume.
 		klog.V(1).Infof("Checking out block volume size.\n")
-		targetQuantity = resource.NewScaledQuantity(getAvailableSpaceBlockFunc(dp.dataFile), 0)
+		targetQuantity = resource.NewScaledQuantity(size, 0)
 	} else {
 		// File system volume.
 		klog.V(1).Infof("Checking out file system volume size.\n")
-		targetQuantity = resource.NewScaledQuantity(getAvailableSpaceFunc(dp.dataDir), 0)
+		size, err := getAvailableSpaceFunc(dp.dataDir)
+		if err != nil {
+			klog.Error(err)
+		}
+		targetQuantity = resource.NewScaledQuantity(size, 0)
 	}
 	if dp.requestImageSize != "" {
 		klog.V(1).Infof("Request image size not empty.\n")
@@ -292,4 +385,18 @@ func (dp *DataProcessor) calculateTargetSize() int64 {
 	klog.V(1).Infof("Target size %s.\n", targetQuantity.String())
 	targetSize, _ := targetQuantity.AsInt64()
 	return targetSize
+}
+
+// PreallocationApplied returns true if data processing path included preallocation step
+func (dp *DataProcessor) PreallocationApplied() common.PreallocationStatus {
+	return dp.preallocationApplied
+}
+
+func (dp *DataProcessor) getUsableSpace() int64 {
+	blockSize := int64(512)
+	spaceWithOverhead := int64((1 - dp.filesystemOverhead) * float64(dp.availableSpace))
+	// qemu-img will round up, making us use more than the usable space.
+	// This later conflicts with image size validation.
+	qemuImgCorrection := util.RoundDown(spaceWithOverhead, blockSize)
+	return qemuImgCorrection
 }

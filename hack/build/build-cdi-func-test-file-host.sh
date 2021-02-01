@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-script_dir="$(readlink -f $(dirname $0))"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 source "${script_dir}"/common.sh
 source "${script_dir}"/config.sh
 
@@ -32,7 +32,5 @@ DOCKER_PREFIX=""
 ${BUILD_DIR}/build-copy-artifacts.sh "${FILE_INIT_PATH}"
 
 cp ${BUILD_DIR}/docker/${FILE_HOST}/* ${OUT_PATH}/${FILE_HOST}/
-cp "${CDI_DIR}/tests/images/tinyCore.iso" "${OUT_PATH}/${FILE_INIT}/"
-cp "${CDI_DIR}/tests/images/archive.tar" "${OUT_PATH}/${FILE_INIT}/"
+cp "${CDI_DIR}/tests/images/*" "${OUT_PATH}/${FILE_INIT}/"
 cp -R "${CDI_DIR}/tests/images/invalid_qcow_images" "${OUT_PATH}/${FILE_INIT}/"
-cp "${CDI_DIR}/tests/images/cirros-qcow2.img" "${OUT_PATH}/${FILE_INIT}/"

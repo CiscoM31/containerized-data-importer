@@ -16,7 +16,8 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/operator"
 	"kubevirt.io/containerized-data-importer/pkg/util"
@@ -69,7 +70,7 @@ func createConfigMap(client kubernetes.Interface, namespace, name string) error 
 		return err
 	}
 
-	_, err = client.CoreV1().ConfigMaps(namespace).Create(cm)
+	_, err = client.CoreV1().ConfigMaps(namespace).Create(context.TODO(), cm, metav1.CreateOptions{})
 	return err
 }
 

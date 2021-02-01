@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -10,21 +9,48 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
 
+	"github.com/golang/snappy"
 	"github.com/prometheus/client_golang/prometheus"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
+	"kubevirt.io/containerized-data-importer/pkg/util"
 	prometheusutil "kubevirt.io/containerized-data-importer/pkg/util/prometheus"
 )
 
 var (
 	contentType string
+	mountPoint  string
 	uploadBytes uint64
 )
 
+type execReader struct {
+	cmd    *exec.Cmd
+	stdout io.ReadCloser
+	stderr io.ReadCloser
+}
+
+func (er *execReader) Read(p []byte) (n int, err error) {
+	n, err = er.stdout.Read(p)
+	if err == io.EOF {
+		if err2 := er.cmd.Wait(); err2 != nil {
+			errBytes, _ := ioutil.ReadAll(er.stderr)
+			klog.Fatalf("Subprocess did not execute successfully, result is: %q\n%s", er.cmd.ProcessState.ExitCode(), string(errBytes))
+		}
+	}
+	return
+}
+
+func (er *execReader) Close() error {
+	return er.stdout.Close()
+}
+
 func init() {
-	flag.StringVar(&contentType, "content_type", "", "archive|kubevirt")
-	flag.Uint64Var(&uploadBytes, "upload_bytes", 0, "approx number of bytes in input")
+	flag.StringVar(&contentType, "content-type", "", "filesystem-clone|blockdevice-clone")
+	flag.StringVar(&mountPoint, "mount", "", "pvc mount point")
+	flag.Uint64Var(&uploadBytes, "upload-bytes", 0, "approx number of bytes in input")
 	klog.InitFlags(nil)
 }
 
@@ -82,29 +108,89 @@ func createProgressReader(readCloser io.ReadCloser, ownerUID string, totalBytes 
 	return promReader
 }
 
-func pipeToGzip(reader io.ReadCloser) io.ReadCloser {
+func pipeToSnappy(reader io.ReadCloser) io.ReadCloser {
 	pr, pw := io.Pipe()
-	gzw := gzip.NewWriter(pw)
+	sbw := snappy.NewBufferedWriter(pw)
 
 	go func() {
-		n, err := io.Copy(gzw, reader)
+		n, err := io.Copy(sbw, reader)
 		if err != nil {
 			klog.Fatalf("Error %s piping to gzip", err)
 		}
-		gzw.Close()
-		pw.Close()
+		if err = sbw.Close(); err != nil {
+			klog.Fatalf("Error closing snappy writer %+v", err)
+		}
+		if err = pw.Close(); err != nil {
+			klog.Fatalf("Error closing pipe writer %+v", err)
+		}
 		klog.Infof("Wrote %d bytes\n", n)
 	}()
 
 	return pr
 }
 
+func validateContentType() {
+	switch contentType {
+	case "filesystem-clone", "blockdevice-clone":
+	default:
+		klog.Fatalf("Invalid content-type %q", contentType)
+	}
+}
+
+func validateMount() {
+	if mountPoint == "" {
+		klog.Fatalf("Invalid mount %q", mountPoint)
+	}
+}
+
+func newTarReader() (io.ReadCloser, error) {
+	cmd := exec.Command("/usr/bin/tar", "Scv", ".")
+	cmd.Dir = mountPoint
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err = cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	return &execReader{cmd: cmd, stdout: stdout, stderr: ioutil.NopCloser(&stderr)}, nil
+}
+
+func getInputStream() (rc io.ReadCloser) {
+	var err error
+	switch contentType {
+	case "filesystem-clone":
+		rc, err = newTarReader()
+		if err != nil {
+			klog.Fatalf("Error creating tar reader for %q: %+v", mountPoint, err)
+		}
+	case "blockdevice-clone":
+		rc, err = os.Open(mountPoint)
+		if err != nil {
+			klog.Fatalf("Error opening block device %q: %+v", mountPoint, err)
+		}
+	default:
+		klog.Fatalf("Invalid content-type %q", contentType)
+	}
+	return
+}
+
 func main() {
 	flag.Parse()
 	defer klog.Flush()
 
-	klog.Infof("content_type is %q\n", contentType)
-	klog.Infof("upload_bytes is %d", uploadBytes)
+	klog.Infof("content-type is %q\n", contentType)
+	klog.Infof("mount is %q\n", mountPoint)
+	klog.Infof("upload-bytes is %d", uploadBytes)
+
+	validateContentType()
+	validateMount()
 
 	ownerUID := getEnvVarOrDie(common.OwnerUID)
 
@@ -116,7 +202,7 @@ func main() {
 
 	klog.V(1).Infoln("Starting cloner target")
 
-	reader := pipeToGzip(createProgressReader(os.Stdin, ownerUID, uploadBytes))
+	reader := pipeToSnappy(createProgressReader(getInputStream(), ownerUID, uploadBytes))
 
 	startPrometheus()
 
@@ -147,4 +233,9 @@ func main() {
 	klog.V(1).Infof("Response body:\n%s", buf.String())
 
 	klog.V(1).Infoln("clone complete")
+	err = util.WriteTerminationMessage("Clone Complete")
+	if err != nil {
+		klog.Errorf("%+v", err)
+		os.Exit(1)
+	}
 }

@@ -22,6 +22,11 @@ const (
 
 	// PrometheusLabel provides the label to indicate prometheus metrics are available in the pods.
 	PrometheusLabel = "prometheus.cdi.kubevirt.io"
+	// PrometheusServiceName is the name of the prometheus service created by the operator.
+	PrometheusServiceName = "cdi-prometheus-metrics"
+
+	// UploadTargetLabel has the UID of upload target PVC
+	UploadTargetLabel = CDIComponentLabel + "/uploadTarget"
 
 	// ImporterVolumePath provides a constant for the directory where the PV is mounted.
 	ImporterVolumePath = "/data"
@@ -66,6 +71,20 @@ const (
 	InsecureTLSVar = "INSECURE_TLS"
 	// ImporterDiskID provides a constant to capture our env variable "IMPORTER_DISK_ID"
 	ImporterDiskID = "IMPORTER_DISK_ID"
+	// ImporterUUID provides a constant to capture our env variable "IMPORTER_UUID"
+	ImporterUUID = "IMPORTER_UUID"
+	// ImporterBackingFile provides a constant to capture our env variable "IMPORTER_BACKING_FILE"
+	ImporterBackingFile = "IMPORTER_BACKING_FILE"
+	// ImporterThumbprint provides a constant to capture our env variable "IMPORTER_THUMBPRINT"
+	ImporterThumbprint = "IMPORTER_THUMBPRINT"
+	// ImporterCurrentCheckpoint provides a constant to capture our env variable "IMPORTER_CURRENT_CHECKPOINT"
+	ImporterCurrentCheckpoint = "IMPORTER_CURRENT_CHECKPOINT"
+	// ImporterPreviousCheckpoint provides a constant to capture our env variable "IMPORTER_PREVIOUS_CHECKPOINT"
+	ImporterPreviousCheckpoint = "IMPORTER_PREVIOUS_CHECKPOINT"
+	// ImporterFinalCheckpoint provides a constant to capture our env variable "IMPORTER_FINAL_CHECKPOINT"
+	ImporterFinalCheckpoint = "IMPORTER_FINAL_CHECKPOINT"
+	// Preallocation provides a constant to capture out env variable "PREALLOCATION"
+	Preallocation = "PREALLOCATION"
 
 	// CloningLabelValue provides a constant to use as a label value for pod affinity (controller pkg only)
 	CloningLabelValue = "host-assisted-cloning"
@@ -97,6 +116,11 @@ const (
 	// UploadImageSize provides a constant to capture our env variable "UPLOAD_IMAGE_SIZE"
 	UploadImageSize = "UPLOAD_IMAGE_SIZE"
 
+	// FilesystemOverheadVar provides a constant to capture our env variable "FILESYSTEM_OVERHEAD"
+	FilesystemOverheadVar = "FILESYSTEM_OVERHEAD"
+	// DefaultGlobalOverhead is the amount of space reserved on Filesystem volumes by default
+	DefaultGlobalOverhead = "0.055"
+
 	// ConfigName is the name of default CDI Config
 	ConfigName = "config"
 
@@ -116,18 +140,95 @@ const (
 	// ScratchSpaceNeededExitCode is the exit code that indicates the importer pod requires scratch space to function properly.
 	ScratchSpaceNeededExitCode = 42
 
+	// ScratchNameSuffix (controller pkg only)
+	ScratchNameSuffix = "scratch"
+
 	// UploadTokenIssuer is the JWT issuer of upload tokens
 	UploadTokenIssuer = "cdi-apiserver"
 
 	// CloneTokenIssuer is the JWT issuer for clone tokens
 	CloneTokenIssuer = "cdi-apiserver"
 
-	// UploadPathSync is the path to POST CDI uploads
-	UploadPathSync = "/v1alpha1/upload"
-
-	// UploadPathAsync is the path to POST CDI uploads in async mode
-	UploadPathAsync = "/v1alpha1/upload-async"
-
 	// QemuSubGid is the gid used as the qemu group in fsGroup
 	QemuSubGid = int64(107)
+
+	// ControllerServiceAccountName is the name of the CDI controller service account
+	ControllerServiceAccountName = "cdi-sa"
+
+	// VddkConfigMap is the name of the ConfigMap with a reference to the VDDK image
+	VddkConfigMap = "v2v-vmware"
+	// VddkConfigDataKey is the name of the ConfigMap key of the VDDK image reference
+	VddkConfigDataKey = "vddk-init-image"
+
+	// UploadContentTypeHeader is the header upload clients may use to set the content type explicitly
+	UploadContentTypeHeader = "x-cdi-content-type"
+
+	// FilesystemCloneContentType is the content type when cloning a filesystem
+	FilesystemCloneContentType = "filesystem-clone"
+
+	// BlockdeviceClone is the content type when cloning a block device
+	BlockdeviceClone = "blockdevice-clone"
+
+	// UploadPathSync is the path to POST CDI uploads
+	UploadPathSync = "/v1beta1/upload"
+
+	// UploadPathAsync is the path to POST CDI uploads in async mode
+	UploadPathAsync = "/v1beta1/upload-async"
+
+	// UploadFormSync is the path to POST CDI uploads as form data
+	UploadFormSync = "/v1beta1/upload-form"
+
+	// UploadFormAsync is the path to POST CDI uploads as form data in async mode
+	UploadFormAsync = "/v1beta1/upload-form-async"
 )
+
+// PreallocationStatus is used to mark result of preallocation in importer and uploader
+type PreallocationStatus string
+
+const (
+	// PreallocationApplied is used to signal that preallocation was performed on the storage
+	PreallocationApplied PreallocationStatus = "true"
+	// PreallocationNotApplied is ued to singal that preallocation was not performed
+	PreallocationNotApplied PreallocationStatus = "false"
+	// PreallocationSkipped is used to signal that preallocation was not performed even though it was requested
+	PreallocationSkipped PreallocationStatus = "skipped"
+)
+
+// PreallocationStatusFromBool converts boolean value to PreallocationStatus
+func PreallocationStatusFromBool(preallocation bool) PreallocationStatus {
+	if preallocation {
+		return PreallocationApplied
+	}
+
+	return PreallocationNotApplied
+}
+
+// ProxyPaths are all supported paths
+var ProxyPaths = append(
+	append(SyncUploadPaths, AsyncUploadPaths...),
+	append(SyncUploadFormPaths, AsyncUploadFormPaths...)...,
+)
+
+// SyncUploadPaths are paths to POST CDI uploads
+var SyncUploadPaths = []string{
+	UploadPathSync,
+	"/v1alpha1/upload",
+}
+
+// AsyncUploadPaths are paths to POST CDI uploads in async mode
+var AsyncUploadPaths = []string{
+	UploadPathAsync,
+	"/v1alpha1/upload-async",
+}
+
+// SyncUploadFormPaths are paths to POST CDI uploads as form data
+var SyncUploadFormPaths = []string{
+	UploadFormSync,
+	"/v1alpha1/upload-form",
+}
+
+// AsyncUploadFormPaths are paths to POST CDI uploads as form data in async mode
+var AsyncUploadFormPaths = []string{
+	UploadFormAsync,
+	"/v1alpha1/upload-form-async",
+}

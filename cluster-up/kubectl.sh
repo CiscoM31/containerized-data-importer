@@ -30,9 +30,11 @@ source ${KUBEVIRTCI_PATH}/hack/common.sh
 source ${KUBEVIRTCI_CLUSTER_PATH}/$KUBEVIRT_PROVIDER/provider.sh
 source ${KUBEVIRTCI_PATH}/hack/config.sh
 
-if [ "$1" == "console" ] || [ "$1" == "vnc" ]; then
-    ${KUBEVIRTCI_PATH}/../_out/cmd/virtctl/virtctl --kubeconfig=${kubeconfig} "$@"
+if [ "$1" == "console" ] || [ "$1" == "vnc" ] || [ "$1" == "start" ] || [ "$1" == "stop" ] || [ "$1" == "migrate" ]; then
+    ${KUBEVIRTCI_PATH}/virtctl.sh "$@"
+elif [ "$1" == "virt" ]; then
+    shift
+    ${KUBEVIRTCI_PATH}/virtctl.sh "$@"
 else
     _kubectl "$@"
 fi
-

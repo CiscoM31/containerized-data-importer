@@ -27,9 +27,10 @@ import (
 	"github.com/pkg/errors"
 	"github.com/ulikunitz/xz"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
@@ -71,6 +72,8 @@ type FormatReaders struct {
 	buf            []byte // holds file headers
 	Convert        bool
 	Archived       bool
+	ArchiveXz      bool
+	ArchiveGz      bool
 	progressReader *prometheusutil.ProgressReader
 }
 
@@ -164,6 +167,7 @@ func (fr *FormatReaders) fileFormatSelector(hdr *image.Header) {
 		r, err = fr.gzReader()
 		if err == nil {
 			fr.Archived = true
+			fr.ArchiveGz = true
 		}
 	case "qcow2":
 		r, err = fr.qcow2NopReader(hdr)
@@ -172,6 +176,7 @@ func (fr *FormatReaders) fileFormatSelector(hdr *image.Header) {
 		r, err = fr.xzReader()
 		if err == nil {
 			fr.Archived = true
+			fr.ArchiveXz = true
 		}
 	}
 	if err == nil && r != nil {
@@ -262,5 +267,7 @@ func (fr *FormatReaders) Close() (rtnerr error) {
 
 // StartProgressUpdate starts the go routine to automatically update the progress on a set interval.
 func (fr *FormatReaders) StartProgressUpdate() {
-	fr.progressReader.StartTimedUpdate()
+	if fr.progressReader != nil {
+		fr.progressReader.StartTimedUpdate()
+	}
 }

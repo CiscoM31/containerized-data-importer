@@ -2,8 +2,8 @@ package framework
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,14 +11,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/gomega"
 	"github.com/pkg/errors"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
+	extclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,15 +28,17 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
 	"kubevirt.io/containerized-data-importer/pkg/common"
-	csiClientset "kubevirt.io/containerized-data-importer/pkg/snapshot-client/clientset/versioned"
+	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
 	"kubevirt.io/containerized-data-importer/tests/utils"
-	ginkgo_reporters "kubevirt.io/qe-tools/pkg/ginkgo-reporters"
 )
 
 const (
@@ -47,14 +51,8 @@ const (
 
 // run-time flags
 var (
-	kubectlPath    *string
-	ocPath         *string
-	cdiInstallNs   *string
-	kubeConfig     *string
-	master         *string
-	goCLIPath      *string
-	snapshotSCName *string
-	blockSCName    *string
+	ClientsInstance = &Clients{}
+	reporter        = NewKubernetesReporter()
 )
 
 // Config provides some basic test config options
@@ -62,8 +60,32 @@ type Config struct {
 	// SkipNamespaceCreation sets whether to skip creating a namespace. Use this ONLY for tests that do not require
 	// a namespace at all, like basic sanity or other global tests.
 	SkipNamespaceCreation bool
-	// SkipControllerPodLookup sets whether to skip looking up the name of the cdi controller pod.
-	SkipControllerPodLookup bool
+
+	// FeatureGates may be overridden for a framework
+	FeatureGates []string
+}
+
+// Clients is the struct containing the client-go kubernetes clients
+type Clients struct {
+	KubectlPath    string
+	OcPath         string
+	CdiInstallNs   string
+	KubeConfig     string
+	Master         string
+	GoCLIPath      string
+	SnapshotSCName string
+	BlockSCName    string
+
+	//  k8sClient provides our k8s client pointer
+	K8sClient *kubernetes.Clientset
+	// CdiClient provides our CDI client pointer
+	CdiClient *cdiClientset.Clientset
+	// ExtClient provides our CSI client pointer
+	ExtClient *extclientset.Clientset
+	// CrClient is a controller runtime client
+	CrClient crclient.Client
+	// RestConfig provides a pointer to our REST client config.
+	RestConfig *rest.Config
 }
 
 // Framework supports common operations used by functional/e2e tests. It holds the k8s and cdi clients,
@@ -73,14 +95,6 @@ type Framework struct {
 	Config
 	// NsPrefix is a prefix for generated namespace
 	NsPrefix string
-	//  k8sClient provides our k8s client pointer
-	K8sClient *kubernetes.Clientset
-	// CdiClient provides our CDI client pointer
-	CdiClient *cdiClientset.Clientset
-	// CsiClient provides our CSI client pointer
-	CsiClient *csiClientset.Clientset
-	// RestConfig provides a pointer to our REST client config.
-	RestConfig *rest.Config
 	// Namespace provides a namespace for each test generated/unique ns per test
 	Namespace *v1.Namespace
 	// Namespace2 provides an additional generated/unique secondary ns for testing across namespaces (eg. clone tests)
@@ -90,146 +104,36 @@ type Framework struct {
 	// ControllerPod provides a pointer to our test controller pod
 	ControllerPod *v1.Pod
 
-	// KubectlPath is a test run-time flag so we can find kubectl
-	KubectlPath string
-	// OcPath is a test run-time flag so we can find OpenShift Client
-	OcPath string
-	// CdiInstallNs is a test run-time flag to store the Namespace we installed CDI in
-	CdiInstallNs string
-	// KubeConfig is a test run-time flag to store the location of our test setup kubeconfig
-	KubeConfig string
-	// Master is a test run-time flag to store the id of our master node
-	Master string
-	// GoCliPath is a test run-time flag to store the location of gocli
-	GoCLIPath string
-	// SnapshotSCName is the Storage Class name that supports Snapshots
-	SnapshotSCName string
-	// BlockSCName is the Storage Class name that supports block mode
-	BlockSCName string
-
+	*Clients
 	reporter *KubernetesReporter
-
-	mux sync.Mutex
 }
 
-// TODO: look into k8s' SynchronizedBeforeSuite() and SynchronizedAfterSuite() code and their general
-//       purpose test/e2e/framework/cleanup.go function support.
-
-// initialize run-time flags
-func init() {
-	// By accessing something in the ginkgo_reporters package, we are ensuring that the init() is called
-	// That init calls flag.StringVar, and makes sure the --junit-output flag is added before we call
-	// flag.Parse in NewFramework. Without this, the flag is NOT added.
-	fmt.Fprintf(ginkgo.GinkgoWriter, "Making sure junit flag is available %v\n", ginkgo_reporters.JunitOutput)
-	kubectlPath = flag.String("kubectl-path", "kubectl", "The path to the kubectl binary")
-	ocPath = flag.String("oc-path", "oc", "The path to the oc binary")
-	cdiInstallNs = flag.String("cdi-namespace", "cdi", "The namespace of the CDI controller")
-	kubeConfig = flag.String("kubeconfig", "/var/run/kubernetes/admin.kubeconfig", "The absolute path to the kubeconfig file")
-	master = flag.String("master", "", "master url:port")
-	goCLIPath = flag.String("gocli-path", "cli.sh", "The path to cli script")
-	snapshotSCName = flag.String("snapshot-sc", "", "The Storage Class supporting snapshots")
-	blockSCName = flag.String("block-sc", "", "The Storage Class supporting block mode volumes")
-}
-
-// NewFrameworkOrDie calls NewFramework and handles errors by calling Fail. Config is optional, but
+// NewFramework calls NewFramework and handles errors by calling Fail. Config is optional, but
 // if passed there can only be one.
-func NewFrameworkOrDie(prefix string, config ...Config) *Framework {
-	cfg := Config{}
+// To understand the order in which things are run, read http://onsi.github.io/ginkgo/#understanding-ginkgos-lifecycle
+// flag parsing happens AFTER ginkgo has constructed the entire testing tree. So anything that uses information from flags
+// cannot work when called during test tree construction.
+func NewFramework(prefix string, config ...Config) *Framework {
+	cfg := Config{
+		FeatureGates: []string{featuregates.HonorWaitForFirstConsumer},
+	}
 	if len(config) > 0 {
 		cfg = config[0]
 	}
-	f, err := NewFramework(prefix, cfg)
-	if err != nil {
-		ginkgo.Fail(fmt.Sprintf("failed to create test framework with config %+v: %v", cfg, err))
-	}
-	return f
-}
-
-// NewFramework makes a new framework and sets up the global BeforeEach/AfterEach's.
-// Test run-time flags are parsed and added to the Framework struct.
-func NewFramework(prefix string, config Config) (*Framework, error) {
 	f := &Framework{
-		Config:   config,
+		Config:   cfg,
 		NsPrefix: prefix,
+		Clients:  ClientsInstance,
+		reporter: reporter,
 	}
-
-	// handle run-time flags
-	if !flag.Parsed() {
-		flag.Parse()
-		klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
-		klog.InitFlags(klogFlags)
-		flag.CommandLine.VisitAll(func(f1 *flag.Flag) {
-			f2 := klogFlags.Lookup(f1.Name)
-			if f2 != nil {
-				value := f1.Value.String()
-				f2.Value.Set(value)
-			}
-		})
-
-		fmt.Fprintf(ginkgo.GinkgoWriter, "** Test flags:\n")
-		flag.Visit(func(f *flag.Flag) {
-			fmt.Fprintf(ginkgo.GinkgoWriter, "   %s = %q\n", f.Name, f.Value.String())
-		})
-		fmt.Fprintf(ginkgo.GinkgoWriter, "**\n")
-	}
-
-	f.KubectlPath = *kubectlPath
-	f.OcPath = *ocPath
-	f.CdiInstallNs = *cdiInstallNs
-	f.KubeConfig = *kubeConfig
-	f.Master = *master
-	f.GoCLIPath = *goCLIPath
-	f.SnapshotSCName = *snapshotSCName
-	f.BlockSCName = *blockSCName
-
-	restConfig, err := f.LoadConfig()
-	if err != nil {
-		// Can't use Expect here due this being called outside of an It block, and Expect
-		// requires any calls to it to be inside an It block.
-		return nil, errors.Wrap(err, "ERROR, unable to load RestConfig")
-	}
-	f.RestConfig = restConfig
-	// clients
-	kcs, err := f.GetKubeClient()
-	if err != nil {
-		return nil, errors.Wrap(err, "ERROR, unable to create K8SClient")
-	}
-	f.K8sClient = kcs
-
-	cs, err := f.GetCdiClient()
-	if err != nil {
-		return nil, errors.Wrap(err, "ERROR, unable to create CdiClient")
-	}
-	f.CdiClient = cs
-
-	csics, err := f.GetCsiClient()
-	if err != nil {
-		return nil, errors.Wrap(err, "ERROR, unable to create CsiClient")
-	}
-	f.CsiClient = csics
 
 	ginkgo.BeforeEach(f.BeforeEach)
 	ginkgo.AfterEach(f.AfterEach)
-	f.reporter = NewKubernetesReporter()
-
-	f.mux.Lock()
-	utils.CacheTestsData(f.K8sClient, f.CdiInstallNs)
-	f.mux.Unlock()
-
-	return f, err
+	return f
 }
 
 // BeforeEach provides a set of operations to run before each test
 func (f *Framework) BeforeEach() {
-	if !f.SkipControllerPodLookup {
-		if f.ControllerPod == nil {
-			pod, err := utils.FindPodByPrefix(f.K8sClient, f.CdiInstallNs, cdiPodPrefix, common.CDILabelSelector)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: Located cdi-controller-pod: %q\n", pod.Name)
-			f.ControllerPod = pod
-		}
-	}
-
 	if !f.SkipNamespaceCreation {
 		// generate unique primary ns (ns2 not created here)
 		ginkgo.By(fmt.Sprintf("Building a %q namespace api object", f.NsPrefix))
@@ -241,10 +145,20 @@ func (f *Framework) BeforeEach() {
 		f.AddNamespaceToDelete(ns)
 	}
 
+	if f.ControllerPod == nil {
+		pod, err := utils.FindPodByPrefix(f.K8sClient, f.CdiInstallNs, cdiPodPrefix, common.CDILabelSelector)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: Located cdi-controller-pod: %q\n", pod.Name)
+		f.ControllerPod = pod
+	}
+
 	if utils.IsNfs() {
 		ginkgo.By("Creating NFS PVs before the test")
 		createNFSPVs(f.K8sClient, f.CdiInstallNs)
 	}
+
+	ginkgo.By(fmt.Sprintf("Configuring default FeatureGates %q", f.FeatureGates))
+	f.setFeatureGates(f.FeatureGates)
 }
 
 // AfterEach provides a set of operations to run after each test
@@ -265,6 +179,15 @@ func (f *Framework) AfterEach() {
 		if utils.IsNfs() {
 			ginkgo.By("Deleting NFS PVs after the test")
 			deleteNFSPVs(f.K8sClient, f.CdiInstallNs)
+			// manually clear out the NFS directories as we use delete retain policy.
+			nfsServerPod, err := utils.FindPodByPrefix(f.K8sClient, f.CdiInstallNs, "nfs-server", "app=nfs-server")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			for i := 1; i <= pvCount; i++ {
+				stdout, stderr, err := f.ExecShellInPod(nfsServerPod.Name, f.CdiInstallNs, fmt.Sprintf("/bin/rm -rf /data/nfs/disk%d/*", i))
+				if err != nil {
+					fmt.Fprintf(ginkgo.GinkgoWriter, "INFO: cleaning up nfs disk%d failed: %s, %s\n", i, stdout, stderr)
+				}
+			}
 		}
 	}()
 
@@ -291,7 +214,7 @@ func (f *Framework) CreateNamespace(prefix string, labels map[string]string) (*v
 	c := f.K8sClient
 	err := wait.PollImmediate(2*time.Second, nsCreateTime, func() (bool, error) {
 		var err error
-		nsObj, err = c.CoreV1().Namespaces().Create(ns)
+		nsObj, err = c.CoreV1().Namespaces().Create(context.TODO(), ns, metav1.CreateOptions{})
 		if err == nil || apierrs.IsAlreadyExists(err) {
 			return true, nil // done
 		}
@@ -313,26 +236,17 @@ func (f *Framework) AddNamespaceToDelete(ns *v1.Namespace) {
 
 // DeleteNS provides a function to delete the specified namespace from the test cluster
 func DeleteNS(c *kubernetes.Clientset, ns string) error {
-	return wait.PollImmediate(2*time.Second, nsDeleteTime, func() (bool, error) {
-		err := c.CoreV1().Namespaces().Delete(ns, nil)
-		if err != nil && !apierrs.IsNotFound(err) {
-			return false, nil // keep trying
-		}
-		// see if ns is really deleted
-		_, err = c.CoreV1().Namespaces().Get(ns, metav1.GetOptions{})
-		if apierrs.IsNotFound(err) {
-			return true, nil // deleted, done
-		}
-		if err != nil {
-			klog.Warningf("namespace %q Get api error: %v", ns, err)
-		}
-		return false, nil // keep trying
-	})
+	// return wait.PollImmediate(2*time.Second, nsDeleteTime, func() (bool, error) {
+	err := c.CoreV1().Namespaces().Delete(context.TODO(), ns, metav1.DeleteOptions{})
+	if err != nil && !apierrs.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // GetCdiClient gets an instance of a kubernetes client that includes all the CDI extensions.
-func (f *Framework) GetCdiClient() (*cdiClientset.Clientset, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags(f.Master, f.KubeConfig)
+func (c *Clients) GetCdiClient() (*cdiClientset.Clientset, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags(c.Master, c.KubeConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -343,24 +257,42 @@ func (f *Framework) GetCdiClient() (*cdiClientset.Clientset, error) {
 	return cdiClient, nil
 }
 
-// GetCsiClient gets an instance of a kubernetes client that includes all the CSI extensions.
-func (f *Framework) GetCsiClient() (*csiClientset.Clientset, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags(f.Master, f.KubeConfig)
+// GetExtClient gets an instance of a kubernetes client that includes all the api extensions.
+func (c *Clients) GetExtClient() (*extclientset.Clientset, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags(c.Master, c.KubeConfig)
 	if err != nil {
 		return nil, err
 	}
-	csiClient, err := csiClientset.NewForConfig(cfg)
+	extClient, err := extclientset.NewForConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return csiClient, nil
+	return extClient, nil
 }
 
-// GetCdiClientForServiceAccount returns a cdi client for a service account
-func (f *Framework) GetCdiClientForServiceAccount(namespace, name string) (*cdiClientset.Clientset, error) {
+// GetCrClient returns a controller runtime client
+func (c *Clients) GetCrClient() (crclient.Client, error) {
+	if err := snapshotv1.AddToScheme(scheme.Scheme); err != nil {
+		return nil, err
+	}
+
+	if err := cdiv1.AddToScheme(scheme.Scheme); err != nil {
+		return nil, err
+	}
+
+	client, err := crclient.New(c.RestConfig, crclient.Options{Scheme: scheme.Scheme})
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
+// GetRESTConfigForServiceAccount returns a RESTConfig for SA
+func (f *Framework) GetRESTConfigForServiceAccount(namespace, name string) (*rest.Config, error) {
 	var secretName string
 
-	sl, err := f.K8sClient.CoreV1().Secrets(namespace).List(metav1.ListOptions{})
+	sl, err := f.K8sClient.CoreV1().Secrets(namespace).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +311,7 @@ func (f *Framework) GetCdiClientForServiceAccount(namespace, name string) (*cdiC
 		return nil, fmt.Errorf("couldn't find service account secret")
 	}
 
-	secret, err := f.K8sClient.CoreV1().Secrets(namespace).Get(secretName, metav1.GetOptions{})
+	secret, err := f.K8sClient.CoreV1().Secrets(namespace).Get(context.TODO(), secretName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -389,13 +321,21 @@ func (f *Framework) GetCdiClientForServiceAccount(namespace, name string) (*cdiC
 		return nil, fmt.Errorf("no token key")
 	}
 
-	cfg := &rest.Config{
+	return &rest.Config{
 		Host:        f.RestConfig.Host,
 		APIPath:     f.RestConfig.APIPath,
 		BearerToken: string(token),
 		TLSClientConfig: rest.TLSClientConfig{
 			Insecure: true,
 		},
+	}, nil
+}
+
+// GetCdiClientForServiceAccount returns a cdi client for a service account
+func (f *Framework) GetCdiClientForServiceAccount(namespace, name string) (*cdiClientset.Clientset, error) {
+	cfg, err := f.GetRESTConfigForServiceAccount(namespace, name)
+	if err != nil {
+		return nil, err
 	}
 
 	cdiClient, err := cdiClientset.NewForConfig(cfg)
@@ -407,13 +347,13 @@ func (f *Framework) GetCdiClientForServiceAccount(namespace, name string) (*cdiC
 }
 
 // GetKubeClient returns a Kubernetes rest client
-func (f *Framework) GetKubeClient() (*kubernetes.Clientset, error) {
-	return GetKubeClientFromRESTConfig(f.RestConfig)
+func (c *Clients) GetKubeClient() (*kubernetes.Clientset, error) {
+	return GetKubeClientFromRESTConfig(c.RestConfig)
 }
 
 // LoadConfig loads our specified kubeconfig
-func (f *Framework) LoadConfig() (*rest.Config, error) {
-	return clientcmd.BuildConfigFromFlags(f.Master, f.KubeConfig)
+func (c *Clients) LoadConfig() (*rest.Config, error) {
+	return clientcmd.BuildConfigFromFlags(c.Master, c.KubeConfig)
 }
 
 // GetKubeClientFromRESTConfig provides a function to get a K8s client using hte REST config
@@ -451,15 +391,20 @@ func (f *Framework) CreatePrometheusServiceInNs(namespace string) (*v1.Service, 
 			},
 		},
 	}
-	return f.K8sClient.CoreV1().Services(namespace).Create(service)
+	return f.K8sClient.CoreV1().Services(namespace).Create(context.TODO(), service, metav1.CreateOptions{})
 }
 
 // CreateQuotaInNs creates a quota and sets it on the current test namespace.
 func (f *Framework) CreateQuotaInNs(requestCPU, requestMemory, limitsCPU, limitsMemory int64) error {
+	return f.CreateQuotaInSpecifiedNs(f.Namespace.GetName(), requestCPU, requestMemory, limitsCPU, limitsMemory)
+}
+
+// CreateQuotaInSpecifiedNs creates a quota and sets it on the specified test namespace.
+func (f *Framework) CreateQuotaInSpecifiedNs(ns string, requestCPU, requestMemory, limitsCPU, limitsMemory int64) error {
 	resourceQuota := &v1.ResourceQuota{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-quota",
-			Namespace: f.Namespace.GetName(),
+			Namespace: ns,
 		},
 		Spec: v1.ResourceQuotaSpec{
 			Hard: v1.ResourceList{
@@ -470,12 +415,12 @@ func (f *Framework) CreateQuotaInNs(requestCPU, requestMemory, limitsCPU, limits
 			},
 		},
 	}
-	_, err := f.K8sClient.CoreV1().ResourceQuotas(f.Namespace.GetName()).Create(resourceQuota)
+	_, err := f.K8sClient.CoreV1().ResourceQuotas(ns).Create(context.TODO(), resourceQuota, metav1.CreateOptions{})
 	if err != nil {
 		ginkgo.Fail("Unable to set resource quota " + err.Error())
 	}
 	return wait.PollImmediate(2*time.Second, nsDeleteTime, func() (bool, error) {
-		quota, err := f.K8sClient.CoreV1().ResourceQuotas(f.Namespace.GetName()).Get("test-quota", metav1.GetOptions{})
+		quota, err := f.K8sClient.CoreV1().ResourceQuotas(ns).Get(context.TODO(), "test-quota", metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -499,7 +444,7 @@ func (f *Framework) UpdateQuotaInNs(requestCPU, requestMemory, limitsCPU, limits
 			},
 		},
 	}
-	_, err := f.K8sClient.CoreV1().ResourceQuotas(f.Namespace.GetName()).Update(resourceQuota)
+	_, err := f.K8sClient.CoreV1().ResourceQuotas(f.Namespace.GetName()).Update(context.TODO(), resourceQuota, metav1.UpdateOptions{})
 	if err != nil {
 		ginkgo.Fail("Unable to set resource quota " + err.Error())
 	}
@@ -508,22 +453,20 @@ func (f *Framework) UpdateQuotaInNs(requestCPU, requestMemory, limitsCPU, limits
 
 // UpdateCdiConfigResourceLimits sets the limits in the CDIConfig object
 func (f *Framework) UpdateCdiConfigResourceLimits(resourceCPU, resourceMemory, limitsCPU, limitsMemory int64) error {
-	config, err := f.CdiClient.CdiV1alpha1().CDIConfigs().Get(common.ConfigName, metav1.GetOptions{})
+	err := utils.UpdateCDIConfig(f.CrClient, func(config *cdiv1.CDIConfigSpec) {
+		config.PodResourceRequirements = &v1.ResourceRequirements{
+			Requests: map[v1.ResourceName]resource.Quantity{
+				v1.ResourceCPU:    *resource.NewQuantity(resourceCPU, resource.DecimalSI),
+				v1.ResourceMemory: *resource.NewQuantity(resourceMemory, resource.DecimalSI)},
+			Limits: map[v1.ResourceName]resource.Quantity{
+				v1.ResourceCPU:    *resource.NewQuantity(limitsCPU, resource.DecimalSI),
+				v1.ResourceMemory: *resource.NewQuantity(limitsMemory, resource.DecimalSI)},
+		}
+	})
 	if err != nil {
 		return err
 	}
-	config.Spec.PodResourceRequirements = &v1.ResourceRequirements{
-		Requests: map[v1.ResourceName]resource.Quantity{
-			v1.ResourceCPU:    *resource.NewQuantity(resourceCPU, resource.DecimalSI),
-			v1.ResourceMemory: *resource.NewQuantity(resourceMemory, resource.DecimalSI)},
-		Limits: map[v1.ResourceName]resource.Quantity{
-			v1.ResourceCPU:    *resource.NewQuantity(limitsCPU, resource.DecimalSI),
-			v1.ResourceMemory: *resource.NewQuantity(limitsMemory, resource.DecimalSI)},
-	}
-	_, err = f.CdiClient.CdiV1alpha1().CDIConfigs().Update(config)
-	if err != nil {
-		return err
-	}
+
 	// see if config got updated
 	return wait.PollImmediate(2*time.Second, nsDeleteTime, func() (bool, error) {
 		res, err := f.runKubectlCommand("get", "CDIConfig", "config", "-o=jsonpath={.status.defaultPodResourceRequirements..['cpu', 'memory']}")
@@ -584,21 +527,19 @@ func (f *Framework) createKubectlCommand(args ...string) *exec.Cmd {
 // IsSnapshotStorageClassAvailable checks if the snapshot storage class exists.
 func (f *Framework) IsSnapshotStorageClassAvailable() bool {
 	// Fetch the storage class
-	storageclass, err := f.K8sClient.StorageV1().StorageClasses().Get(f.SnapshotSCName, metav1.GetOptions{})
+	storageclass, err := f.K8sClient.StorageV1().StorageClasses().Get(context.TODO(), f.SnapshotSCName, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
 
-	// List the snapshot classes
-	scs, err := f.CsiClient.SnapshotV1alpha1().VolumeSnapshotClasses().List(metav1.ListOptions{})
-	if err != nil {
-		klog.V(3).Infof("Cannot list snapshot classes")
+	scs := &snapshotv1.VolumeSnapshotClassList{}
+	if err = f.CrClient.List(context.TODO(), scs); err != nil {
 		return false
 	}
 
 	for _, snapshotClass := range scs.Items {
 		// Validate association between snapshot class and storage class
-		if snapshotClass.Snapshotter == storageclass.Provisioner {
+		if snapshotClass.Driver == storageclass.Provisioner {
 			return true
 		}
 	}
@@ -608,16 +549,39 @@ func (f *Framework) IsSnapshotStorageClassAvailable() bool {
 
 // IsBlockVolumeStorageClassAvailable checks if the block volume storage class exists.
 func (f *Framework) IsBlockVolumeStorageClassAvailable() bool {
-	sc, err := f.K8sClient.StorageV1().StorageClasses().Get(f.BlockSCName, metav1.GetOptions{})
+	sc, err := f.K8sClient.StorageV1().StorageClasses().Get(context.TODO(), f.BlockSCName, metav1.GetOptions{})
 	if err != nil {
 		return false
 	}
 	return sc.Name == f.BlockSCName
 }
 
+// IsBindingModeWaitForFirstConsumer checks if the storage class with specified name has the VolumeBindingMode set to WaitForFirstConsumer
+func (f *Framework) IsBindingModeWaitForFirstConsumer(storageClassName *string) bool {
+	if storageClassName == nil {
+		return false
+	}
+	storageClass, err := f.K8sClient.StorageV1().StorageClasses().Get(context.TODO(), *storageClassName, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return storageClass.VolumeBindingMode != nil &&
+		*storageClass.VolumeBindingMode == storagev1.VolumeBindingWaitForFirstConsumer
+}
+
+func (f *Framework) setFeatureGates(defaultFeatureGates []string) {
+	gomega.Eventually(func() bool {
+		err := utils.UpdateCDIConfig(f.CrClient, func(config *cdiv1.CDIConfigSpec) {
+			config.FeatureGates = defaultFeatureGates
+		})
+		return err == nil
+	}, timeout, pollingInterval).Should(gomega.BeTrue())
+}
+
 func getMaxFailsFromEnv() int {
 	maxFailsEnv := os.Getenv("REPORTER_MAX_FAILS")
 	if maxFailsEnv == "" {
+		fmt.Fprintf(os.Stderr, "defaulting to 10 reported failures\n")
 		return 10
 	}
 
@@ -627,6 +591,7 @@ func getMaxFailsFromEnv() int {
 		return 10
 	}
 
+	fmt.Fprintf(os.Stderr, "Number of reported failures[%d]\n", maxFails)
 	return maxFails
 }
 
@@ -653,6 +618,7 @@ func (r *KubernetesReporter) Dump(kubeCli *kubernetes.Clientset, cdiClient *cdiC
 	if r.artifactsDir == "" {
 		return
 	}
+	fmt.Fprintf(os.Stderr, "Current failure count[%d]\n", r.FailureCount)
 	if r.FailureCount > r.maxFails {
 		return
 	}
@@ -669,6 +635,8 @@ func (r *KubernetesReporter) Dump(kubeCli *kubernetes.Clientset, cdiClient *cdiC
 	r.logPVCs(kubeCli)
 	r.logPVs(kubeCli)
 	r.logPods(kubeCli)
+	r.logServices(kubeCli)
+	r.logEndpoints(kubeCli)
 	r.logLogs(kubeCli, since)
 }
 
@@ -690,13 +658,59 @@ func (r *KubernetesReporter) logPods(kubeCli *kubernetes.Clientset) {
 	}
 	defer f.Close()
 
-	pods, err := kubeCli.CoreV1().Pods(v1.NamespaceAll).List(metav1.ListOptions{})
+	pods, err := kubeCli.CoreV1().Pods(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch pods: %v\n", err)
 		return
 	}
 
 	j, err := json.MarshalIndent(pods, "", "    ")
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(f, string(j))
+}
+
+func (r *KubernetesReporter) logServices(kubeCli *kubernetes.Clientset) {
+
+	f, err := os.OpenFile(filepath.Join(r.artifactsDir, fmt.Sprintf("%d_services.log", r.FailureCount)),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open the file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	services, err := kubeCli.CoreV1().Services(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to fetch services: %v\n", err)
+		return
+	}
+
+	j, err := json.MarshalIndent(services, "", "    ")
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(f, string(j))
+}
+
+func (r *KubernetesReporter) logEndpoints(kubeCli *kubernetes.Clientset) {
+
+	f, err := os.OpenFile(filepath.Join(r.artifactsDir, fmt.Sprintf("%d_endpoints.log", r.FailureCount)),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to open the file: %v", err)
+		return
+	}
+	defer f.Close()
+
+	endpoints, err := kubeCli.CoreV1().Endpoints(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to fetch endpointss: %v\n", err)
+		return
+	}
+
+	j, err := json.MarshalIndent(endpoints, "", "    ")
 	if err != nil {
 		return
 	}
@@ -713,7 +727,7 @@ func (r *KubernetesReporter) logNodes(kubeCli *kubernetes.Clientset) {
 	}
 	defer f.Close()
 
-	nodes, err := kubeCli.CoreV1().Nodes().List(metav1.ListOptions{})
+	nodes, err := kubeCli.CoreV1().Nodes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch nodes: %v\n", err)
 		return
@@ -736,7 +750,7 @@ func (r *KubernetesReporter) logPVs(kubeCli *kubernetes.Clientset) {
 	}
 	defer f.Close()
 
-	pvs, err := kubeCli.CoreV1().PersistentVolumes().List(metav1.ListOptions{})
+	pvs, err := kubeCli.CoreV1().PersistentVolumes().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch pvs: %v\n", err)
 		return
@@ -759,7 +773,7 @@ func (r *KubernetesReporter) logPVCs(kubeCli *kubernetes.Clientset) {
 	}
 	defer f.Close()
 
-	pvcs, err := kubeCli.CoreV1().PersistentVolumeClaims(v1.NamespaceAll).List(metav1.ListOptions{})
+	pvcs, err := kubeCli.CoreV1().PersistentVolumeClaims(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch pvcs: %v\n", err)
 		return
@@ -781,7 +795,7 @@ func (r *KubernetesReporter) logDVs(cdiClientset *cdiClientset.Clientset) {
 	}
 	defer f.Close()
 
-	dvs, err := cdiClientset.CdiV1alpha1().DataVolumes(v1.NamespaceAll).List(metav1.ListOptions{})
+	dvs, err := cdiClientset.CdiV1beta1().DataVolumes(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch datavolumes: %v\n", err)
 		return
@@ -805,7 +819,7 @@ func (r *KubernetesReporter) logLogs(kubeCli *kubernetes.Clientset, since time.D
 
 	startTime := time.Now().Add(-since).Add(-5 * time.Second)
 
-	pods, err := kubeCli.CoreV1().Pods(v1.NamespaceAll).List(metav1.ListOptions{})
+	pods, err := kubeCli.CoreV1().Pods(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to fetch pods: %v\n", err)
 		return
@@ -828,12 +842,12 @@ func (r *KubernetesReporter) logLogs(kubeCli *kubernetes.Clientset, since time.D
 			defer previous.Close()
 
 			logStart := metav1.NewTime(startTime)
-			logs, err := kubeCli.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &v1.PodLogOptions{SinceTime: &logStart, Container: container.Name}).DoRaw()
+			logs, err := kubeCli.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &v1.PodLogOptions{SinceTime: &logStart, Container: container.Name}).DoRaw(context.TODO())
 			if err == nil {
 				fmt.Fprintln(current, string(logs))
 			}
 
-			logs, err = kubeCli.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &v1.PodLogOptions{SinceTime: &logStart, Container: container.Name, Previous: true}).DoRaw()
+			logs, err = kubeCli.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &v1.PodLogOptions{SinceTime: &logStart, Container: container.Name, Previous: true}).DoRaw(context.TODO())
 			if err == nil {
 				fmt.Fprintln(previous, string(logs))
 			}
@@ -853,7 +867,7 @@ func (r *KubernetesReporter) logEvents(kubeCli *kubernetes.Clientset, since time
 
 	startTime := time.Now().Add(-since).Add(-5 * time.Second)
 
-	events, err := kubeCli.CoreV1().Events(v1.NamespaceAll).List(metav1.ListOptions{})
+	events, err := kubeCli.CoreV1().Events(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		return
 	}

@@ -33,9 +33,10 @@ import (
 
 	"github.com/pkg/errors"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
-	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
+	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
@@ -48,9 +49,8 @@ const (
 // 1a. Info -> Convert (In Info phase the format readers are configured), if the source Reader image is not archived, and no custom CA is used, and can be converted by QEMU-IMG (RAW/QCOW2)
 // 1b. Info -> TransferArchive if the content type is archive
 // 1c. Info -> Transfer in all other cases.
-// 2a. Transfer -> Process if content type is kube virt
+// 2a. Transfer -> Convert if content type is kube virt
 // 2b. Transfer -> Complete if content type is archive (Transfer is called with the target instead of the scratch space). Non block PVCs only.
-// 3. Process -> Convert
 type HTTPDataSource struct {
 	httpReader io.ReadCloser
 	ctx        context.Context
@@ -64,10 +64,14 @@ type HTTPDataSource struct {
 	endpoint *url.URL
 	// url the url to report to the caller of getURL, could be the endpoint, or a file in scratch space.
 	url *url.URL
-	// true if we are using a custom CA (and thus have to use scratch storage)
-	customCA bool
+	// path to the custom CA. Empty if not used
+	customCA string
+	// true if we know `qemu-img` will fail to download this
+	brokenForQemuImg bool
 	// the content length reported by the http server.
 	contentLength uint64
+
+	n *image.Nbdkit
 }
 
 // NewHTTPDataSource creates a new instance of the http data provider.
@@ -77,7 +81,7 @@ func NewHTTPDataSource(endpoint, accessKey, secKey, certDir string, contentType 
 		return nil, errors.Wrapf(err, fmt.Sprintf("unable to parse endpoint %q", endpoint))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	httpReader, contentLength, err := createHTTPReader(ctx, ep, accessKey, secKey, certDir)
+	httpReader, contentLength, brokenForQemuImg, err := createHTTPReader(ctx, ep, accessKey, secKey, certDir)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -87,13 +91,14 @@ func NewHTTPDataSource(endpoint, accessKey, secKey, certDir string, contentType 
 		ep.User = url.UserPassword(accessKey, secKey)
 	}
 	httpSource := &HTTPDataSource{
-		ctx:           ctx,
-		cancel:        cancel,
-		httpReader:    httpReader,
-		contentType:   contentType,
-		endpoint:      ep,
-		customCA:      certDir != "",
-		contentLength: contentLength,
+		ctx:              ctx,
+		cancel:           cancel,
+		httpReader:       httpReader,
+		contentType:      contentType,
+		endpoint:         ep,
+		customCA:         certDir,
+		brokenForQemuImg: brokenForQemuImg,
+		contentLength:    contentLength,
 	}
 	// We know this is a counting reader, so no need to check.
 	countingReader := httpReader.(*util.CountingReader)
@@ -112,34 +117,43 @@ func (hs *HTTPDataSource) Info() (ProcessingPhase, error) {
 		klog.Errorf("Error creating readers: %v", err)
 		return ProcessingPhaseError, err
 	}
-	// The readers now contain all the information needed to determine if we can stream directly or if we need scratch space to download
-	// the file to, before converting.
-	if !hs.readers.Archived && !hs.customCA && hs.readers.Convert {
-		// We can pass straight to conversion from the endpoint. No scratch required.
-		hs.url = hs.endpoint
+	if hs.brokenForQemuImg {
+		return ProcessingPhaseTransferScratch, nil
+	}
+	hs.url = hs.endpoint
+	if !hs.readers.Archived && hs.customCA == "" && hs.readers.Convert {
+		// We can pass straight to conversion from the endpoint
 		return ProcessingPhaseConvert, nil
 	}
-	if !hs.readers.Convert {
-		return ProcessingPhaseTransferDataFile, nil
+	hs.n = image.NewNbdkitCurl("/var/run/nbdkit.pid", hs.customCA)
+	if hs.readers.ArchiveGz {
+		hs.n.AddFilter(image.NbdkitGzipFilter)
+		klog.V(2).Infof("Added nbdkit gzip filter")
 	}
-	return ProcessingPhaseTransferScratch, nil
+	if hs.readers.ArchiveXz {
+		hs.n.AddFilter(image.NbdkitXzFilter)
+		klog.V(2).Infof("Added nbdkit xz filter")
+	}
+	qemuOperations = image.NewNbdkitOperations(hs.GetNbdkit())
+	return ProcessingPhaseConvert, nil
 }
 
 // Transfer is called to transfer the data from the source to a scratch location.
 func (hs *HTTPDataSource) Transfer(path string) (ProcessingPhase, error) {
 	if hs.contentType == cdiv1.DataVolumeKubeVirt {
-		if util.GetAvailableSpace(path) <= int64(0) {
+		size, err := util.GetAvailableSpace(path)
+		if size <= int64(0) {
 			//Path provided is invalid.
 			return ProcessingPhaseError, ErrInvalidPath
 		}
 		file := filepath.Join(path, tempFile)
-		err := util.StreamDataToFile(hs.readers.TopReader(), file)
+		err = util.StreamDataToFile(hs.readers.TopReader(), file)
 		if err != nil {
 			return ProcessingPhaseError, err
 		}
 		// If we successfully wrote to the file, then the parse will succeed.
 		hs.url, _ = url.Parse(file)
-		return ProcessingPhaseProcess, nil
+		return ProcessingPhaseConvert, nil
 	} else if hs.contentType == cdiv1.DataVolumeArchive {
 		if err := util.UnArchiveTar(hs.readers.TopReader(), path); err != nil {
 			return ProcessingPhaseError, errors.Wrap(err, "unable to untar files from endpoint")
@@ -160,14 +174,14 @@ func (hs *HTTPDataSource) TransferFile(fileName string) (ProcessingPhase, error)
 	return ProcessingPhaseResize, nil
 }
 
-// Process is called to do any special processing before giving the URI to the data back to the processor
-func (hs *HTTPDataSource) Process() (ProcessingPhase, error) {
-	return ProcessingPhaseConvert, nil
-}
-
 // GetURL returns the URI that the data processor can use when converting the data.
 func (hs *HTTPDataSource) GetURL() *url.URL {
 	return hs.url
+}
+
+// GetNbdkit returns the nbdkit instance of the importer
+func (hs *HTTPDataSource) GetNbdkit() *image.Nbdkit {
+	return hs.n
 }
 
 // Close all readers.
@@ -233,10 +247,11 @@ func createHTTPClient(certDir string) (*http.Client, error) {
 	return client, nil
 }
 
-func createHTTPReader(ctx context.Context, ep *url.URL, accessKey, secKey, certDir string) (io.ReadCloser, uint64, error) {
+func createHTTPReader(ctx context.Context, ep *url.URL, accessKey, secKey, certDir string) (io.ReadCloser, uint64, bool, error) {
+	var brokenForQemuImg bool
 	client, err := createHTTPClient(certDir)
 	if err != nil {
-		return nil, uint64(0), errors.Wrap(err, "Error creating http client")
+		return nil, uint64(0), false, errors.Wrap(err, "Error creating http client")
 	}
 
 	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
@@ -248,7 +263,7 @@ func createHTTPReader(ctx context.Context, ep *url.URL, accessKey, secKey, certD
 
 	total, err := getContentLength(client, ep, accessKey, secKey)
 	if err != nil {
-		return nil, total, err
+		brokenForQemuImg = true
 	}
 	// http.NewRequest can only return error on invalid METHOD, or invalid url. Here the METHOD is always GET, and the url is always valid, thus error cannot happen.
 	req, _ := http.NewRequest("GET", ep.String(), nil)
@@ -260,17 +275,28 @@ func createHTTPReader(ctx context.Context, ep *url.URL, accessKey, secKey, certD
 	klog.V(2).Infof("Attempting to get object %q via http client\n", ep.String())
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, uint64(0), errors.Wrap(err, "HTTP request errored")
+		return nil, uint64(0), true, errors.Wrap(err, "HTTP request errored")
 	}
 	if resp.StatusCode != 200 {
 		klog.Errorf("http: expected status code 200, got %d", resp.StatusCode)
-		return nil, uint64(0), errors.Errorf("expected status code 200, got %d. Status: %s", resp.StatusCode, resp.Status)
+		return nil, uint64(0), true, errors.Errorf("expected status code 200, got %d. Status: %s", resp.StatusCode, resp.Status)
+	}
+
+	acceptRanges, ok := resp.Header["Accept-Ranges"]
+	if !ok || acceptRanges[0] == "none" {
+		klog.V(2).Infof("Accept-Ranges isn't bytes, avoiding qemu-img")
+		brokenForQemuImg = true
+	}
+
+	if total == 0 {
+		// The total seems bogus. Let's try the GET Content-Length header
+		total = parseHTTPHeader(resp)
 	}
 	countingReader := &util.CountingReader{
 		Reader:  resp.Body,
 		Current: 0,
 	}
-	return countingReader, total, nil
+	return countingReader, total, brokenForQemuImg, nil
 }
 
 func (hs *HTTPDataSource) pollProgress(reader *util.CountingReader, idleTime, pollInterval time.Duration) {
@@ -324,18 +350,25 @@ func getContentLength(client *http.Client, ep *url.URL, accessKey, secKey string
 		klog.V(3).Infof("GO CLIENT: key: %s, value: %s\n", k, v)
 	}
 
-	total := uint64(0)
-	if val, ok := resp.Header["Content-Length"]; ok {
-		total, err = strconv.ParseUint(val[0], 10, 64)
-		if err != nil {
-			return uint64(0), errors.Wrap(err, "could not convert content length")
-		}
-		klog.V(3).Infof("Content length: %d\n", total)
-	}
+	total := parseHTTPHeader(resp)
 
 	err = resp.Body.Close()
 	if err != nil {
 		return uint64(0), errors.Wrap(err, "could not close head read")
 	}
 	return total, nil
+}
+
+func parseHTTPHeader(resp *http.Response) uint64 {
+	var err error
+	total := uint64(0)
+	if val, ok := resp.Header["Content-Length"]; ok {
+		total, err = strconv.ParseUint(val[0], 10, 64)
+		if err != nil {
+			klog.Errorf("could not convert content length, got %v", err)
+		}
+		klog.V(3).Infof("Content length: %d\n", total)
+	}
+
+	return total
 }

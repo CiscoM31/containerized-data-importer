@@ -29,7 +29,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"kubevirt.io/containerized-data-importer/pkg/common"
 )
@@ -62,6 +62,19 @@ type authConfigWatcher struct {
 
 	config *AuthConfig
 	mutex  sync.RWMutex
+}
+
+// ValidateName checks if name is allowed
+func (ac *AuthConfig) ValidateName(name string) bool {
+	klog.V(3).Infof("Validating CN: %s", name)
+	for _, n := range ac.AllowedNames {
+		if n == name {
+			return true
+		}
+	}
+	// no allowed names means anyone is allowed
+	// https://kubernetes.io/docs/tasks/extend-kubernetes/configure-aggregation-layer/#kubernetes-apiserver-client-authentication
+	return len(ac.AllowedNames) == 0
 }
 
 // NewAuthConfigWatcher crates a new authConfigWatcher

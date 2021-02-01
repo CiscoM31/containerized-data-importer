@@ -19,7 +19,7 @@ set -euo pipefail
 readonly MAX_CDI_WAIT_RETRY=30
 readonly CDI_WAIT_TIME=10
 
-script_dir="$(readlink -f $(dirname $0))"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
 source hack/build/config.sh
 source hack/build/common.sh
 
@@ -30,13 +30,21 @@ KUBEVIRTCI_CONFIG_PATH="$(
 
 # functional testing
 BASE_PATH=${KUBEVIRTCI_CONFIG_PATH:-$PWD}
-KUBECONFIG=${BASE_PATH}/$KUBEVIRT_PROVIDER/.kubeconfig
-KUBECTL=${BASE_PATH}/$KUBEVIRT_PROVIDER/.kubectl
+KUBECONFIG=${KUBECONFIG:-$BASE_PATH/$KUBEVIRT_PROVIDER/.kubeconfig}
 GOCLI=${GOCLI:-${CDI_DIR}/cluster-up/cli.sh}
 KUBE_MASTER_URL=${KUBE_MASTER_URL:-""}
 CDI_NAMESPACE=${CDI_NAMESPACE:-cdi}
 SNAPSHOT_SC=${SNAPSHOT_SC:-rook-ceph-block}
 BLOCK_SC=${BLOCK_SC:-rook-ceph-block}
+
+if [ -z "${KUBECTL+x}" ]; then
+    kubevirtci_kubectl="${BASE_PATH}/${KUBEVIRT_PROVIDER}/.kubectl"
+    if [ -e ${kubevirtci_kubectl} ]; then
+        KUBECTL=${kubevirtci_kubectl}
+    else
+        KUBECTL=$(which kubectl)
+    fi
+fi
 
 # parsetTestOpts sets 'pkgs' and test_args
 parseTestOpts "${@}"
@@ -72,6 +80,9 @@ if [ $retry_counter -eq $MAX_CDI_WAIT_RETRY ]; then
     exit 1
 fi
 
-test_command="${TESTS_OUT_DIR}/tests.test -test.timeout 180m ${test_args}"
-echo "${test_command}"
-(cd ${CDI_DIR}/tests; ${test_command})
+test_command="${TESTS_OUT_DIR}/tests.test -test.timeout 360m ${test_args}"
+echo "$test_command"
+(
+    cd ${CDI_DIR}/tests
+    ${test_command}
+)

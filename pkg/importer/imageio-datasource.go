@@ -31,7 +31,8 @@ import (
 
 	ovirtsdk4 "github.com/ovirt/go-ovirt"
 	"github.com/pkg/errors"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
@@ -47,12 +48,16 @@ type ImageioDataSource struct {
 	url *url.URL
 	// the content length reported by ovirt-imageio.
 	contentLength uint64
+	// imageTransfer is the tranfer object handling the tranfer of oVirt disk
+	imageTransfer *ovirtsdk4.ImageTransfer
+	// connection is connection to the oVirt system
+	connection ConnectionInterface
 }
 
 // NewImageioDataSource creates a new instance of the ovirt-imageio data provider.
 func NewImageioDataSource(endpoint string, accessKey string, secKey string, certDir string, diskID string) (*ImageioDataSource, error) {
 	ctx, cancel := context.WithCancel(context.Background())
-	imageioReader, contentLength, err := createImageioReader(ctx, endpoint, accessKey, secKey, certDir, diskID)
+	imageioReader, contentLength, it, conn, err := createImageioReader(ctx, endpoint, accessKey, secKey, certDir, diskID)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -62,6 +67,8 @@ func NewImageioDataSource(endpoint string, accessKey string, secKey string, cert
 		cancel:        cancel,
 		imageioReader: imageioReader,
 		contentLength: contentLength,
+		imageTransfer: it,
+		connection:    conn,
 	}
 	// We know this is a counting reader, so no need to check.
 	countingReader := imageioReader.(*util.CountingReader)
@@ -87,7 +94,8 @@ func (is *ImageioDataSource) Info() (ProcessingPhase, error) {
 // Transfer is called to transfer the data from the source to a scratch location.
 func (is *ImageioDataSource) Transfer(path string) (ProcessingPhase, error) {
 	// we know that there won't be archives
-	if util.GetAvailableSpace(path) <= int64(0) {
+	size, _ := util.GetAvailableSpace(path)
+	if size <= int64(0) {
 		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
@@ -98,7 +106,7 @@ func (is *ImageioDataSource) Transfer(path string) (ProcessingPhase, error) {
 	}
 	// If we successfully wrote to the file, then the parse will succeed.
 	is.url, _ = url.Parse(file)
-	return ProcessingPhaseProcess, nil
+	return ProcessingPhaseConvert, nil
 }
 
 // TransferFile is called to transfer the data from the source to the passed in file.
@@ -111,11 +119,6 @@ func (is *ImageioDataSource) TransferFile(fileName string) (ProcessingPhase, err
 	return ProcessingPhaseResize, nil
 }
 
-// Process is called to do any special processing before giving the URI to the data back to the processor
-func (is *ImageioDataSource) Process() (ProcessingPhase, error) {
-	return ProcessingPhaseConvert, nil
-}
-
 // GetURL returns the URI that the data processor can use when converting the data.
 func (is *ImageioDataSource) GetURL() *url.URL {
 	return is.url
@@ -126,6 +129,15 @@ func (is *ImageioDataSource) Close() error {
 	var err error
 	if is.readers != nil {
 		err = is.readers.Close()
+	}
+	if is.imageTransfer != nil {
+		if itID, ok := is.imageTransfer.Id(); ok {
+			transfersService := is.connection.SystemService().ImageTransfersService()
+			_, err = transfersService.ImageTransferService(itID).Finalize().Send()
+		}
+	}
+	if is.connection != nil {
+		err = is.connection.Close()
 	}
 	is.cancelLock.Lock()
 	if is.cancel != nil {
@@ -163,26 +175,25 @@ func (is *ImageioDataSource) pollProgress(reader *util.CountingReader, idleTime,
 	}
 }
 
-func createImageioReader(ctx context.Context, ep string, accessKey string, secKey string, certDir string, diskID string) (io.ReadCloser, uint64, error) {
+func createImageioReader(ctx context.Context, ep string, accessKey string, secKey string, certDir string, diskID string) (io.ReadCloser, uint64, *ovirtsdk4.ImageTransfer, ConnectionInterface, error) {
 	conn, err := newOvirtClientFunc(ep, accessKey, secKey)
 	if err != nil {
-		return nil, uint64(0), errors.Wrap(err, "Error creating connection")
+		return nil, uint64(0), nil, conn, errors.Wrap(err, "Error creating connection")
 	}
-	defer conn.Close()
 
 	it, total, err := getTransfer(conn, diskID)
 	if err != nil {
-		return nil, uint64(0), err
+		return nil, uint64(0), it, conn, err
 	}
 
 	// Use the create client from http source.
 	client, err := createHTTPClient(certDir)
 	if err != nil {
-		return nil, uint64(0), err
+		return nil, uint64(0), it, conn, err
 	}
 	transferURL, available := it.TransferUrl()
 	if !available {
-		return nil, uint64(0), errors.New("Error transfer url not available")
+		return nil, uint64(0), it, conn, errors.New("Error transfer url not available")
 	}
 
 	req, err := http.NewRequest("GET", transferURL, nil)
@@ -190,44 +201,49 @@ func createImageioReader(ctx context.Context, ep string, accessKey string, secKe
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, uint64(0), errors.Wrap(err, "Sending request failed")
+		return nil, uint64(0), it, conn, errors.Wrap(err, "Sending request failed")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, uint64(0), errors.Errorf("bad status: %s", resp.Status)
+		return nil, uint64(0), it, conn, errors.Errorf("bad status: %s", resp.Status)
+	}
+
+	if total == 0 {
+		// The total seems bogus. Let's try the GET Content-Length header
+		total = parseHTTPHeader(resp)
 	}
 	countingReader := &util.CountingReader{
 		Reader:  resp.Body,
 		Current: 0,
 	}
-	return countingReader, uint64(total), nil
+	return countingReader, total, it, conn, nil
 }
 
-func getTransfer(conn ConnectionInterface, diskID string) (*ovirtsdk4.ImageTransfer, int64, error) {
+func getTransfer(conn ConnectionInterface, diskID string) (*ovirtsdk4.ImageTransfer, uint64, error) {
 	disksService := conn.SystemService().DisksService()
 	diskService := disksService.DiskService(diskID)
 	diskRequest := diskService.Get()
 	diskResponse, err := diskRequest.Send()
 	if err != nil {
-		return nil, int64(0), errors.Wrap(err, "Error fetching disk")
+		return nil, uint64(0), errors.Wrap(err, "Error fetching disk")
 	}
 	disk, success := diskResponse.Disk()
 	if !success {
-		return nil, int64(0), errors.New("Error disk not found")
+		return nil, uint64(0), errors.New("Error disk not found")
 	}
 
 	totalSize, available := disk.TotalSize()
 	if !available {
-		return nil, int64(0), errors.New("Error total disk size not available")
+		return nil, uint64(0), errors.New("Error total disk size not available")
 	}
 
 	id, available := disk.Id()
 	if !available {
-		return nil, int64(0), errors.New("Error disk id not available")
+		return nil, uint64(0), errors.New("Error disk id not available")
 	}
 
 	image, err := ovirtsdk4.NewImageBuilder().Id(id).Build()
 	if err != nil {
-		return nil, int64(0), errors.Wrap(err, "Error building image object")
+		return nil, uint64(0), errors.Wrap(err, "Error building image object")
 	}
 
 	transfersService := conn.SystemService().ImageTransfersService()
@@ -240,7 +256,7 @@ func getTransfer(conn ConnectionInterface, diskID string) (*ovirtsdk4.ImageTrans
 		ovirtsdk4.DISKFORMAT_RAW,
 	).Build()
 	if err != nil {
-		return nil, int64(0), errors.Wrap(err, "Error preparing transfer object")
+		return nil, uint64(0), errors.Wrap(err, "Error preparing transfer object")
 	}
 
 	transfer.ImageTransfer(imageTransfer)
@@ -253,25 +269,25 @@ func getTransfer(conn ConnectionInterface, diskID string) (*ovirtsdk4.ImageTrans
 				time.Sleep(15 * time.Second)
 				continue
 			}
-			return nil, int64(0), errors.Wrap(err, "Error sending transfer image request")
+			return nil, uint64(0), errors.Wrap(err, "Error sending transfer image request")
 		}
 		it, available = response.ImageTransfer()
 		if !available {
-			return nil, int64(0), errors.New("Error image transfer not available")
+			return nil, uint64(0), errors.New("Error image transfer not available")
 		}
 		phase, available := it.Phase()
 		if !available {
-			return nil, int64(0), errors.New("Error phase not available")
+			return nil, uint64(0), errors.New("Error phase not available")
 		}
 		if phase == ovirtsdk4.IMAGETRANSFERPHASE_INITIALIZING {
 			time.Sleep(1 * time.Second)
 		} else if phase == ovirtsdk4.IMAGETRANSFERPHASE_TRANSFERRING {
 			break
 		} else {
-			return nil, int64(0), errors.Errorf("Error transfer phase: %s", phase)
+			return nil, uint64(0), errors.Errorf("Error transfer phase: %s", phase)
 		}
 	}
-	return it, totalSize, nil
+	return it, uint64(totalSize), nil
 }
 
 func loadCA(certDir string) (*x509.CertPool, error) {
@@ -345,6 +361,21 @@ type SystemServiceInteface interface {
 // ImageTransfersServiceInterface defines service methods
 type ImageTransfersServiceInterface interface {
 	Add() ImageTransferServiceAddInterface
+	ImageTransferService(string) ImageTransferServiceInterface
+}
+
+// ImageTransferServiceInterface defines service methods
+type ImageTransferServiceInterface interface {
+	Finalize() ImageTransferServiceFinalizeRequestInterface
+}
+
+// ImageTransferServiceFinalizeRequestInterface defines service methods
+type ImageTransferServiceFinalizeRequestInterface interface {
+	Send() (ImageTransferServiceFinalizeResponseInterface, error)
+}
+
+// ImageTransferServiceFinalizeResponseInterface defines service methods
+type ImageTransferServiceFinalizeResponseInterface interface {
 }
 
 // ImageTransferServiceAddInterface defines service methods
@@ -398,6 +429,11 @@ type ImageTransfersService struct {
 	srv *ovirtsdk4.ImageTransfersService
 }
 
+// ImageTransferService wraps ovirt transfer service
+type ImageTransferService struct {
+	srv *ovirtsdk4.ImageTransferService
+}
+
 // ImageTransfersServiceAdd wraps ovirt add transfer service
 type ImageTransfersServiceAdd struct {
 	srv *ovirtsdk4.ImageTransfersServiceAddRequest
@@ -411,6 +447,16 @@ type ImageTransfersServiceResponse struct {
 // ImageTransfersServiceAddResponse wraps ovirt add transfer service
 type ImageTransfersServiceAddResponse struct {
 	srv *ovirtsdk4.ImageTransfersServiceAddResponse
+}
+
+// ImageTransferServiceFinalizeRequest warps finalize request
+type ImageTransferServiceFinalizeRequest struct {
+	srv *ovirtsdk4.ImageTransferServiceFinalizeRequest
+}
+
+// ImageTransferServiceFinalizeResponse warps finalize response
+type ImageTransferServiceFinalizeResponse struct {
+	srv *ovirtsdk4.ImageTransferServiceFinalizeResponse
 }
 
 // ImageTransfer sets image transfer and returns add request
@@ -449,6 +495,14 @@ func (service *ImageTransfersServiceResponse) Send() (ImageTransfersServiceAddRe
 }
 
 // Send returns disk get response
+func (service *ImageTransferServiceFinalizeRequest) Send() (ImageTransferServiceFinalizeResponseInterface, error) {
+	resp, err := service.srv.Send()
+	return &ImageTransferServiceFinalizeResponse{
+		srv: resp,
+	}, err
+}
+
+// Send returns disk get response
 func (service *DiskServiceGet) Send() (DiskServiceResponseInterface, error) {
 	resp, err := service.srv.Send()
 	return &DiskServiceResponse{
@@ -481,6 +535,20 @@ func (service *SystemService) DisksService() DisksServiceInterface {
 func (service *SystemService) ImageTransfersService() ImageTransfersServiceInterface {
 	return &ImageTransfersService{
 		srv: service.srv.ImageTransfersService(),
+	}
+}
+
+// ImageTransferService returns image service
+func (service *ImageTransfersService) ImageTransferService(id string) ImageTransferServiceInterface {
+	return &ImageTransferService{
+		srv: service.srv.ImageTransferService(id),
+	}
+}
+
+// Finalize returns image service
+func (service *ImageTransferService) Finalize() ImageTransferServiceFinalizeRequestInterface {
+	return &ImageTransferServiceFinalizeRequest{
+		srv: service.srv.Finalize(),
 	}
 }
 

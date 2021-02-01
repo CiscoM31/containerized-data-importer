@@ -1,18 +1,26 @@
 package tests_test
 
 import (
+	"context"
 	"fmt"
 
 	. "github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
 
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
 	"kubevirt.io/containerized-data-importer/tests"
 	"kubevirt.io/containerized-data-importer/tests/framework"
 )
 
 var _ = Describe("[rfe_id:1347][crit:high][vendor:cnv-qe@redhat.com][level:component]Basic Sanity", func() {
-	f := framework.NewFrameworkOrDie("sanity", framework.Config{
+	f := framework.NewFramework("sanity", framework.Config{
 		SkipNamespaceCreation: true,
+		FeatureGates:          []string{featuregates.HonorWaitForFirstConsumer},
 	})
 
 	Context("[test_id:1348]CDI service account should exist", func() {
@@ -103,11 +111,34 @@ var _ = Describe("[rfe_id:1347][crit:high][vendor:cnv-qe@redhat.com][level:compo
 			ValidateRBACForResource(f, secretsExpectedResult, "secrets", sa)
 		})
 	})
+
+	Context("CRDs must be a structural schema", func() {
+		table.DescribeTable("crd name", func(crdName string) {
+			crd, err := f.ExtClient.ApiextensionsV1().CustomResourceDefinitions().Get(context.TODO(), crdName, metav1.GetOptions{})
+			if k8serrors.IsNotFound(err) {
+				Skip("Doesn't work on openshift 3.11")
+			}
+			Expect(err).ToNot(HaveOccurred())
+			Expect(crd.ObjectMeta.Name).To(Equal(crdName))
+			for _, cond := range crd.Status.Conditions {
+				if cond.Type == extv1.CustomResourceDefinitionConditionType("NonStructuralSchema") {
+					if cond.Status == extv1.ConditionTrue {
+						Fail(fmt.Sprintf("CRD %s is not a structural schema", crdName))
+					}
+				}
+			}
+		},
+			table.Entry("[test_id:5056]CDIConfigs", "cdiconfigs.cdi.kubevirt.io"),
+			table.Entry("[test_id:5057]CDIs", "cdis.cdi.kubevirt.io"),
+			table.Entry("[test_id:5056]Datavolumes", "datavolumes.cdi.kubevirt.io"),
+		)
+	})
 })
 
 func ValidateRBACForResource(f *framework.Framework, expectedResults map[string]string, resource string, sa string) {
 	for verb, expectedRes := range expectedResults {
 		By(fmt.Sprintf("verifying cdi-sa "+resource+" rules, for verb %s", verb))
+
 		result, err := tests.RunKubectlCommand(f, "auth", "can-i", "--as", sa, verb, resource)
 		if expectedRes != "no" {
 			Expect(err).ToNot(HaveOccurred())

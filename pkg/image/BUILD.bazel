@@ -4,8 +4,8 @@ go_library(
     name = "go_default_library",
     srcs = [
         "filefmt.go",
+        "nbdkit.go",
         "qemu.go",
-        "skopeo.go",
         "validate.go",
     ],
     importpath = "kubevirt.io/containerized-data-importer/pkg/image",
@@ -18,7 +18,7 @@ go_library(
         "//vendor/github.com/prometheus/client_golang/prometheus:go_default_library",
         "//vendor/github.com/prometheus/client_model/go:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/api/resource:go_default_library",
-        "//vendor/k8s.io/klog:go_default_library",
+        "//vendor/k8s.io/klog/v2:go_default_library",
     ],
 )
 
@@ -26,14 +26,13 @@ go_test(
     name = "go_default_test",
     srcs = [
         "filefmt_test.go",
+        "nbdkit_test.go",
         "qemu_suite_test.go",
         "qemu_test.go",
-        "skopeo_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
         "//pkg/system:go_default_library",
-        "//pkg/util:go_default_library",
         "//tests/reporters:go_default_library",
         "//vendor/github.com/onsi/ginkgo:go_default_library",
         "//vendor/github.com/onsi/ginkgo/extensions/table:go_default_library",

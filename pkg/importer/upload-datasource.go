@@ -5,7 +5,8 @@ import (
 	"net/url"
 	"path/filepath"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
@@ -13,9 +14,8 @@ import (
 // Sequence of phases:
 // 1a. ProcessingPhaseInfo -> ProcessingPhaseTransferScratch (In Info phase the format readers are configured) In case the readers don't contain a raw file.
 // 1b. ProcessingPhaseInfo -> ProcessingPhaseTransferDataFile, in the case the readers contain a raw file.
-// 2a. ProcessingPhaseTransferScratch -> ProcessingPhaseProcess
+// 2a. ProcessingPhaseTransferScratch -> ProcessingPhaseConvert
 // 2b. ProcessingPhaseTransferDataFile -> ProcessingPhaseResize
-// 3. ProcessingPhaseProcess -> ProcessingPhaseConvert
 type UploadDataSource struct {
 	// Data strean
 	stream io.ReadCloser
@@ -50,18 +50,22 @@ func (ud *UploadDataSource) Info() (ProcessingPhase, error) {
 
 // Transfer is called to transfer the data from the source to the passed in path.
 func (ud *UploadDataSource) Transfer(path string) (ProcessingPhase, error) {
-	if util.GetAvailableSpace(path) <= int64(0) {
+	size, err := util.GetAvailableSpace(path)
+	if err != nil {
+		return ProcessingPhaseError, err
+	}
+	if size <= int64(0) {
 		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
 	file := filepath.Join(path, tempFile)
-	err := util.StreamDataToFile(ud.readers.TopReader(), file)
+	err = util.StreamDataToFile(ud.readers.TopReader(), file)
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
 	// If we successfully wrote to the file, then the parse will succeed.
 	ud.url, _ = url.Parse(file)
-	return ProcessingPhaseProcess, nil
+	return ProcessingPhaseConvert, nil
 }
 
 // TransferFile is called to transfer the data from the source to the passed in file.
@@ -70,12 +74,9 @@ func (ud *UploadDataSource) TransferFile(fileName string) (ProcessingPhase, erro
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
+	// If we successfully wrote to the file, then the parse will succeed.
+	ud.url, _ = url.Parse(fileName)
 	return ProcessingPhaseResize, nil
-}
-
-// Process is called to do any special processing before giving the url to the data back to the processor
-func (ud *UploadDataSource) Process() (ProcessingPhase, error) {
-	return ProcessingPhaseConvert, nil
 }
 
 // GetURL returns the url that the data processor can use when converting the data.
@@ -116,19 +117,23 @@ func (aud *AsyncUploadDataSource) Info() (ProcessingPhase, error) {
 
 // Transfer is called to transfer the data from the source to the passed in path.
 func (aud *AsyncUploadDataSource) Transfer(path string) (ProcessingPhase, error) {
-	if util.GetAvailableSpace(path) <= int64(0) {
+	size, err := util.GetAvailableSpace(path)
+	if err != nil {
+		return ProcessingPhaseError, err
+	}
+	if size <= int64(0) {
 		//Path provided is invalid.
 		return ProcessingPhaseError, ErrInvalidPath
 	}
 	file := filepath.Join(path, tempFile)
-	err := util.StreamDataToFile(aud.uploadDataSource.readers.TopReader(), file)
+	err = util.StreamDataToFile(aud.uploadDataSource.readers.TopReader(), file)
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
 	// If we successfully wrote to the file, then the parse will succeed.
 	aud.uploadDataSource.url, _ = url.Parse(file)
-	aud.ResumePhase = ProcessingPhaseProcess
-	return ProcessingPhasePause, nil
+	aud.ResumePhase = ProcessingPhaseConvert
+	return ProcessingPhaseValidatePause, nil
 }
 
 // TransferFile is called to transfer the data from the source to the passed in file.
@@ -137,13 +142,10 @@ func (aud *AsyncUploadDataSource) TransferFile(fileName string) (ProcessingPhase
 	if err != nil {
 		return ProcessingPhaseError, err
 	}
+	// If we successfully wrote to the file, then the parse will succeed.
+	aud.uploadDataSource.url, _ = url.Parse(fileName)
 	aud.ResumePhase = ProcessingPhaseResize
-	return ProcessingPhasePause, nil
-}
-
-// Process is called to do any special processing before giving the url to the data back to the processor
-func (aud *AsyncUploadDataSource) Process() (ProcessingPhase, error) {
-	return ProcessingPhaseConvert, nil
+	return ProcessingPhaseValidatePause, nil
 }
 
 // Close closes any readers or other open resources.

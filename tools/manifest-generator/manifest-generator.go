@@ -20,7 +20,7 @@ import (
 	"text/template"
 
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	cdicluster "kubevirt.io/containerized-data-importer/pkg/operator/resources/cluster"
 	cdinamespaced "kubevirt.io/containerized-data-importer/pkg/operator/resources/namespaced"
 	cdioperator "kubevirt.io/containerized-data-importer/pkg/operator/resources/operator"
@@ -41,6 +41,7 @@ type templateData struct {
 	UploadServerImage      string
 	Verbosity              string
 	PullPolicy             string
+	CrName                 string
 	Namespace              string
 	GeneratedManifests     map[string]string
 }
@@ -60,6 +61,7 @@ var (
 	uploadServerImage      = flag.String("uploadserver-image", "", "")
 	verbosity              = flag.String("verbosity", "1", "")
 	pullPolicy             = flag.String("pull-policy", "", "")
+	crName                 = flag.String("cr-name", "", "")
 	namespace              = flag.String("namespace", "", "")
 )
 
@@ -101,6 +103,7 @@ func generateFromFile(templFile string) {
 		UploadProxyImage:       *uploadProxyImage,
 		UploadServerImage:      *uploadServerImage,
 		PullPolicy:             *pullPolicy,
+		CrName:                 *crName,
 		Namespace:              *namespace,
 	}
 

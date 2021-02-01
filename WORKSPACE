@@ -49,11 +49,11 @@ gazelle_dependencies()
 # bazel docker rules
 http_archive(
     name = "io_bazel_rules_docker",
-    sha256 = "d0b345518236e240d513fe0f59f6d3da274f035480273a7eb00af7d216ae2a06",
-    strip_prefix = "rules_docker-0.11.1",
+    sha256 = "4521794f0fba2e20f3bf15846ab5e01d5332e587e9ce81629c7f96c793bb7036",
+    strip_prefix = "rules_docker-0.14.4",
     urls = [
-        "https://github.com/bazelbuild/rules_docker/releases/download/v0.11.1/rules_docker-v0.11.1.tar.gz",
-        "https://storage.googleapis.com/builddeps/d0b345518236e240d513fe0f59f6d3da274f035480273a7eb00af7d216ae2a06",
+        "https://github.com/bazelbuild/rules_docker/releases/download/v0.14.4/rules_docker-v0.14.4.tar.gz",
+        "https://storage.googleapis.com/builddeps/4521794f0fba2e20f3bf15846ab5e01d5332e587e9ce81629c7f96c793bb7036",
     ],
 )
 
@@ -75,6 +75,10 @@ load("@io_bazel_rules_docker//repositories:deps.bzl", container_deps = "deps")
 
 container_deps()
 
+load("@io_bazel_rules_docker//repositories:pip_repositories.bzl", "pip_deps")
+
+pip_deps()
+
 # RPM rules
 http_archive(
     name = "io_bazel_rules_container_rpm",
@@ -86,21 +90,21 @@ http_archive(
     ],
 )
 
-# Pull base image fedora31
+# Pull base image fedora33
 container_pull(
     name = "fedora",
-    digest = "sha256:6c4b03683891b7f8963c0dcc9a654d8a95a441ec20bf9a24a1560ac02004da35",
-    registry = "quay.io",
-    repository = "awels/fedora-minimal-image",
-    tag = "31",
+    digest = "sha256:fdf235fa167d2aa5d820fba274ec1d2edeb0534bd32d28d602a19b31bad79b80",
+    registry = "index.docker.io",
+    repository = "fedora",
+    tag = "33",
 )
 
 container_pull(
     name = "fedora-docker",
-    digest = "sha256:d3d106e8f3affb1011b97c2b6ef388430dc1474bf7c7ad05963cff49961edb89",
+    digest = "sha256:fdf235fa167d2aa5d820fba274ec1d2edeb0534bd32d28d602a19b31bad79b80",
     registry = "index.docker.io",
     repository = "fedora",
-    tag = "31",
+    tag = "33",
 )
 
 # Pull base image container registry
@@ -115,367 +119,540 @@ container_pull(
 # RPMS
 http_file(
     name = "qemu-img",
-    sha256 = "2f6f519bce659ac7e9a5ceab1899fe464dffaa196b9d7603e68aac21657d0096",
+    sha256 = "7128a6513323264b21e1572764fa2d2ea11753a1c1c3933a4bc1c4843f165633",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/q/qemu-img-4.1.1-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/2f6f519bce659ac7e9a5ceab1899fe464dffaa196b9d7603e68aac21657d0096",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/q/qemu-img-5.1.0-5.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/7128a6513323264b21e1572764fa2d2ea11753a1c1c3933a4bc1c4843f165633",
     ],
 )
 
 http_file(
     name = "qemu-block-curl",
-    sha256 = "084f4df7971c7a624996cf05f43ff60ff1a19fdc7800e338519826edaab3811d",
+    sha256 = "0160d7f1ac0e364f618ecdd598e86550c780c4b2ab26fbe728a84ebd560013f8",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/q/qemu-block-curl-4.1.1-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/084f4df7971c7a624996cf05f43ff60ff1a19fdc7800e338519826edaab3811d",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/q/qemu-block-curl-5.1.0-5.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/0160d7f1ac0e364f618ecdd598e86550c780c4b2ab26fbe728a84ebd560013f8",
     ],
 )
 
 http_file(
     name = "nginx",
-    sha256 = "3ae196450e27518aca0d89a4e33f1aa45babace90395009aea11401c5e8d50cc",
+    sha256 = "e98ab45cb7f616ac99d5dde14d318c0374c060816b02a0d6360a1ac6e6f0c5c4",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/nginx-1.16.1-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/3ae196450e27518aca0d89a4e33f1aa45babace90395009aea11401c5e8d50cc",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nginx-1.18.0-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/e98ab45cb7f616ac99d5dde14d318c0374c060816b02a0d6360a1ac6e6f0c5c4",
     ],
 )
 
 http_file(
     name = "xen-libs",
-    sha256 = "06147608a5c32e3678f67dd7ad87abb4cd50b0a234a2bbc3ef643f67eec05e53",
+    sha256 = "b5a460dceb4f9feff4701088f6421bbf380f9eb285b56fac1409e236a9d6877b",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/x/xen-libs-4.12.2-2.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/06147608a5c32e3678f67dd7ad87abb4cd50b0a234a2bbc3ef643f67eec05e53",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/x/xen-libs-4.14.0-12.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/b5a460dceb4f9feff4701088f6421bbf380f9eb285b56fac1409e236a9d6877b",
     ],
 )
 
 http_file(
     name = "libaio",
-    sha256 = "ee6596a5010c2b4a038861828ecca240aa03c592dacd83c3a70d44cb8ee50408",
+    sha256 = "51ae3b86c7a6fd64ed187574b3a0a7e3a58f533a6db80e3bf44be99f5fd72f50",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/libaio-0.3.111-6.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/ee6596a5010c2b4a038861828ecca240aa03c592dacd83c3a70d44cb8ee50408",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libaio-0.3.111-10.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/51ae3b86c7a6fd64ed187574b3a0a7e3a58f533a6db80e3bf44be99f5fd72f50",
     ],
 )
 
 http_file(
     name = "capstone",
-    sha256 = "4d2671bc78b11650e8ccf75926e34295c641433759eab8f8932b8403bfa15319",
+    sha256 = "1ee04e337c7ba1d8f3d17510b4b86d5a2090f31244a4d9cef3f6f5eb83ec93a9",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/c/capstone-4.0.1-4.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/4d2671bc78b11650e8ccf75926e34295c641433759eab8f8932b8403bfa15319",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/c/capstone-4.0.2-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/1ee04e337c7ba1d8f3d17510b4b86d5a2090f31244a4d9cef3f6f5eb83ec93a9",
     ],
 )
 
 http_file(
     name = "gperftools-lib",
-    sha256 = "e58e5da835e2c8b762fd6ec9968416245a80986d6f6bf3b3f4664c4e63f65eb9",
+    sha256 = "4013a64942bbb4644f433e38ff3a2cb0db19978d5aff44461efb42b4edfd0993",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/g/gperftools-libs-2.7-6.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/e58e5da835e2c8b762fd6ec9968416245a80986d6f6bf3b3f4664c4e63f65eb9",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/gperftools-libs-2.8-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/4013a64942bbb4644f433e38ff3a2cb0db19978d5aff44461efb42b4edfd0993",
     ],
 )
 
 http_file(
     name = "libunwind",
-    sha256 = "b1a86867aa0faa7f1cf9cfef5134f6f27f22ebfa18fe5840f064aaa0c13fc389",
+    sha256 = "01957e4ebfb63766b22fb9d865d8c8e13b945a4a49cc14af7261e9d1bc6279f2",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/libunwind-1.3.1-3.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/b1a86867aa0faa7f1cf9cfef5134f6f27f22ebfa18fe5840f064aaa0c13fc389",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libunwind-1.4.0-4.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/01957e4ebfb63766b22fb9d865d8c8e13b945a4a49cc14af7261e9d1bc6279f2",
     ],
 )
 
 http_file(
     name = "nginx-mimetypes",
-    sha256 = "f4ef1413fa087ae8630930a1eab67d3cbcf501c39648ffc1a534267f21d38d9e",
+    sha256 = "e860501275c9073f199354766d9ccd99afc0b97fff8acae8e8184d4f02799d38",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/nginx-mimetypes-2.1.48-6.fc31.noarch.rpm",
-        "https://storage.googleapis.com/builddeps/f4ef1413fa087ae8630930a1eab67d3cbcf501c39648ffc1a534267f21d38d9e",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nginx-mimetypes-2.1.49-2.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/e860501275c9073f199354766d9ccd99afc0b97fff8acae8e8184d4f02799d38",
     ],
 )
 
 http_file(
     name = "nginx-filesystem",
-    sha256 = "97b13750fe1dfbd00b6cb8fecaf8e7bc7aac4b233a5e430d65fa0e200ef337ea",
+    sha256 = "ff48d81762bb83eb5ed5aed829a50515af3b706ec6c7b8645ac1f3ac034eefe0",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/nginx-filesystem-1.16.1-1.fc31.noarch.rpm",
-        "https://storage.googleapis.com/builddeps/97b13750fe1dfbd00b6cb8fecaf8e7bc7aac4b233a5e430d65fa0e200ef337ea",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nginx-filesystem-1.18.0-3.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/ff48d81762bb83eb5ed5aed829a50515af3b706ec6c7b8645ac1f3ac034eefe0",
     ],
 )
 
 http_file(
     name = "buildah",
-    sha256 = "b375721a3ee2ea54ff550bffe6d6e5c810dce803dd7b91df4f0a1884d2b0a926",
+    sha256 = "15d9cca0887f78d7c5530b2b65fc90b221b999962dfa6323b42571020ae434e9",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/b/buildah-1.14.0-2.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/b375721a3ee2ea54ff550bffe6d6e5c810dce803dd7b91df4f0a1884d2b0a926",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/b/buildah-1.18.0-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/15d9cca0887f78d7c5530b2b65fc90b221b999962dfa6323b42571020ae434e9",
     ],
 )
 
 http_file(
     name = "containers-common",
-    sha256 = "410eac36fab2b18ea7a959041175e14a6f3530bc995c655d41e6a4c2604a2a9e",
+    sha256 = "26f573cf377eff79893b17a7e3f2ade9984820bcd1776db5fc24bb8b70587349",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/c/containers-common-0.1.41-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/410eac36fab2b18ea7a959041175e14a6f3530bc995c655d41e6a4c2604a2a9e",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/c/containers-common-1.2.0-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/26f573cf377eff79893b17a7e3f2ade9984820bcd1776db5fc24bb8b70587349",
     ],
 )
 
 http_file(
     name = "tar",
-    sha256 = "9975496f29601a1c2cdb89e63aac698fdd8283ba3a52a9d91ead9473a0e064c8",
+    sha256 = "871dc18514b9b64bcff6c4c61fd4c1a9f4c1e46cddd6f6934b4ee93662541aca",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/t/tar-1.32-2.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/9975496f29601a1c2cdb89e63aac698fdd8283ba3a52a9d91ead9473a0e064c8",
-    ],
-)
-
-http_file(
-    name = "skopeo",
-    sha256 = "9ae93d78a41face16d842c4da4ffc07bc8b119fbcd23d436b41a44a5643d4dc0",
-    urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/updates/31/Everything/x86_64/Packages/s/skopeo-0.1.41-1.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/9ae93d78a41face16d842c4da4ffc07bc8b119fbcd23d436b41a44a5643d4dc0",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/t/tar-1.32-6.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/871dc18514b9b64bcff6c4c61fd4c1a9f4c1e46cddd6f6934b4ee93662541aca",
     ],
 )
 
 http_file(
     name = "ostree-libs",
-    sha256 = "4011ad8b367db9d528d47202d07c287a958d4bd11a56b11618818dcb3be55bc6",
+    sha256 = "2523f8915b724a14312cd4103faa0e6a213b6dab18a89c7bec6e3c70b0acc66d",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/o/ostree-libs-2019.4-3.fc31.x86_64.rpm",
-        "https://storage.googleapis.com/builddeps/4011ad8b367db9d528d47202d07c287a958d4bd11a56b11618818dcb3be55bc6",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/o/ostree-libs-2020.8-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/2523f8915b724a14312cd4103faa0e6a213b6dab18a89c7bec6e3c70b0acc66d",
     ],
 )
 
 http_file(
     name = "lvm2",
-    sha256 = "790256fe3d3b39700a4345649fcaab1da8dc1d13104577480d1807a108c0273f",
+    sha256 = "1d0378ffc0575f8627445aa666533e4558235d830adb61927069e4682eca3104",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/lvm2-2.03.05-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/lvm2-2.03.10-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/1d0378ffc0575f8627445aa666533e4558235d830adb61927069e4682eca3104",
     ],
 )
 
 http_file(
     name = "lvm2-libs",
-    sha256 = "c8125a5f282f6022a2ca0c287c6804301262432646aba5a5b8ec06eeacb83102",
+    sha256 = "dbc237320a73c44c38124da66469d199a49c3361d416f9e7354b9e106043938c",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/lvm2-libs-2.03.05-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/lvm2-libs-2.03.10-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/dbc237320a73c44c38124da66469d199a49c3361d416f9e7354b9e106043938c",
     ],
 )
 
 http_file(
     name = "device-mapper",
-    sha256 = "d8fa0b0947084bce50438b7eaf5a5085abd35e36c69cfb13d5f58e98a258e36f",
+    sha256 = "3d0f1d848a92a8401ca6c8778f9a9a329af8a8420ae14a5c8c99ccbcbd97ebb7",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-1.02.163-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/d/device-mapper-1.02.173-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/3d0f1d848a92a8401ca6c8778f9a9a329af8a8420ae14a5c8c99ccbcbd97ebb7",
+    ],
+)
+
+http_file(
+    name = "device-mapper-libs",
+    sha256 = "9539c6e7a76422600939d661382634d7912e0669aa7e273fdf14b1fcde5b0652",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/d/device-mapper-libs-1.02.173-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/9539c6e7a76422600939d661382634d7912e0669aa7e273fdf14b1fcde5b0652",
     ],
 )
 
 http_file(
     name = "device-mapper-event",
-    sha256 = "9dfb6c534d23d3058d83dfaf669544b58318c34351ae46e7341cdeee51be2ab8",
+    sha256 = "68242b0ea47075bd78ef4bbab44520d2061582ad8ebf57fd4027fdac77f256f0",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-event-1.02.163-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/d/device-mapper-event-1.02.173-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/68242b0ea47075bd78ef4bbab44520d2061582ad8ebf57fd4027fdac77f256f0",
     ],
 )
 
 http_file(
     name = "device-mapper-event-libs",
-    sha256 = "3d9ed59c05d68649e255ab6961ce7b8b758ab82cbe74d6912d0f4395c7ebd4f3",
+    sha256 = "605a07738477a5a7d9c536f84e7df5b3f7c607125c08223151cab4dae1e8b9cb",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-event-libs-1.02.163-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/d/device-mapper-event-libs-1.02.173-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/605a07738477a5a7d9c536f84e7df5b3f7c607125c08223151cab4dae1e8b9cb",
     ],
 )
 
 http_file(
     name = "device-mapper-persistent-data",
-    sha256 = "4a3eef2bea1e3a1fe305b9c2acbf46d6bc6063d415fe0c33c25416ed42791cee",
+    sha256 = "f7e8201cb8e3fb9269c47c1ca758aebcd529a7a1578bd520d74074943e96b3e9",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/d/device-mapper-persistent-data-0.8.5-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/d/device-mapper-persistent-data-0.8.5-4.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/f7e8201cb8e3fb9269c47c1ca758aebcd529a7a1578bd520d74074943e96b3e9",
     ],
 )
 
 http_file(
     name = "compat-readline5",
-    sha256 = "03179d5423784f6a61d18dcbb35fe986fb318ebac65330c0228bbef4e835c992",
+    sha256 = "d37fb057cd371d93c2b3903544bbd3d30683242867ebfd7996866494c9b71021",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/c/compat-readline5-5.2-34.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/c/compat-readline5-5.2-37.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/d37fb057cd371d93c2b3903544bbd3d30683242867ebfd7996866494c9b71021",
     ],
 )
 
 http_file(
     name = "kmod",
-    sha256 = "ec22cf64138373b6f28dab0b824fbf9cdec8060bf7b8ce8216a361ab70f0849b",
+    sha256 = "5d3d98545ad28bd76a8fe11acbebde68897872aeb0c6fb2b63f9b8b495b7383c",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/k/kmod-26-4.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/k/kmod-27-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/5d3d98545ad28bd76a8fe11acbebde68897872aeb0c6fb2b63f9b8b495b7383c",
     ],
 )
 
 http_file(
     name = "basesystem",
-    sha256 = "20ef955e5f735233a425725b9af41d960b5602dfb0ae812ae720e37c9bf8a292",
+    sha256 = "f4efaa5bc8382246d8230ece8bacebd3c29eb9fd52b509b1e6575e643953851b",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/b/basesystem-11-8.fc31.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/b/basesystem-11-10.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/f4efaa5bc8382246d8230ece8bacebd3c29eb9fd52b509b1e6575e643953851b",
     ],
 )
 
 http_file(
     name = "bash",
-    sha256 = "09f5522e833a03fd66e7ea9368331b7f316f494db26decda59cbacb6ea4185b3",
+    sha256 = "c59a621f3cdd5e073b3c1ef9cd8fd9d7e02d77d94be05330390eac05f77b5b60",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/b/bash-5.0.7-3.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/b/bash-5.0.17-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/c59a621f3cdd5e073b3c1ef9cd8fd9d7e02d77d94be05330390eac05f77b5b60",
     ],
 )
 
 http_file(
     name = "fedora-gpg-keys",
-    sha256 = "f2ae011207332ac90d0cf50b1f0b9eb0ce8be1d4d4c7186463dff38a90af0f3d",
+    sha256 = "45565c84ae0c38c2dda5f1d17b398acb1c6be3018e7ab385ce7920cd888e779b",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/f/fedora-gpg-keys-31-1.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/f/fedora-gpg-keys-33-1.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/45565c84ae0c38c2dda5f1d17b398acb1c6be3018e7ab385ce7920cd888e779b",
     ],
 )
 
 http_file(
     name = "fedora-release",
-    sha256 = "40eee4e4234c781277a202aa0e834c2be8afc28a3e4012b07d6c24058b0f4add",
+    sha256 = "5e4cba4a5a21d9f84a364ae3ba129eb26d1b0514c810cf5d116b6e879e8efff5",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/f/fedora-release-31-1.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/f/fedora-release-33-2.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/5e4cba4a5a21d9f84a364ae3ba129eb26d1b0514c810cf5d116b6e879e8efff5",
     ],
 )
 
 http_file(
     name = "fedora-release-common",
-    sha256 = "e566c03caeeaa58db28c0b257f5d36ea92adfe2a18884208f03611c35397a6a1",
+    sha256 = "a98b94b73e2213e9e53ff3855ac7a306b1965db0518a0e510411b801d9d15d4e",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/f/fedora-release-common-31-1.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/f/fedora-release-common-33-2.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/a98b94b73e2213e9e53ff3855ac7a306b1965db0518a0e510411b801d9d15d4e",
     ],
 )
 
 http_file(
     name = "fedora-repos",
-    sha256 = "9c9250ccd816e5d8c2bfdee14d16e9e71d2038707009e36e7642c136d7c62e4c",
+    sha256 = "7a541cc42342eca39eb487cf0de670ad374006a7a204c0e1f5ff69b6b509ab6f",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/f/fedora-repos-31-1.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/f/fedora-repos-33-1.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/7a541cc42342eca39eb487cf0de670ad374006a7a204c0e1f5ff69b6b509ab6f",
     ],
 )
 
 http_file(
     name = "filesystem",
-    sha256 = "ce05d442cca1de33cb9b4dfb72b94d8b97a072e2add394e075131d395ef463ff",
+    sha256 = "2d9ed3be09813ff727751a6db3a839e49630257df9ab5a21204335f4ca49fecc",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/f/filesystem-3.12-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/f/filesystem-3.14-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/2d9ed3be09813ff727751a6db3a839e49630257df9ab5a21204335f4ca49fecc",
     ],
 )
 
 http_file(
     name = "glibc",
-    sha256 = "33e0ad9b92d40c4e09d6407df1c8549b3d4d3d64fdd482439e66d12af6004f13",
+    sha256 = "f3c6365e5f6ad3d6c34eda0ef25faec8bbd6d0a10d0a5ee226725d50ac6b0a47",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/g/glibc-2.30-5.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/g/glibc-2.32-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/f3c6365e5f6ad3d6c34eda0ef25faec8bbd6d0a10d0a5ee226725d50ac6b0a47",
     ],
 )
 
 http_file(
     name = "glibc-all-langpacks",
-    sha256 = "f67d5cc67029c6c38185f94b72aaa9034a49f5c4f166066c8268b41e1b18a202",
+    sha256 = "9d3d5441c7c898109519fa33dd51c615d9d2266206cceae1a159549c5aa6fe33",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/g/glibc-all-langpacks-2.30-5.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/g/glibc-all-langpacks-2.32-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/9d3d5441c7c898109519fa33dd51c615d9d2266206cceae1a159549c5aa6fe33",
     ],
 )
 
 http_file(
     name = "glibc-common",
-    sha256 = "1098c7738ca3b78a999074fbb93a268acac499ee8994c29757b1b858f59381bb",
+    sha256 = "5e272782cc7bdc3e2005d7b01de6c130eaed69c7d4d01d9bb4b7354af675c13a",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/g/glibc-common-2.30-5.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/g/glibc-common-2.32-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/5e272782cc7bdc3e2005d7b01de6c130eaed69c7d4d01d9bb4b7354af675c13a",
     ],
 )
 
 http_file(
     name = "libgcc",
-    sha256 = "4106397648e9ef9ed7de9527f0da24c7e5698baa5bc1961b44707b55730ad5e1",
+    sha256 = "14a7ad9770c7d20998dd7e57e9d98666da9e2abd61bbf529a3c54cb2af67d567",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/libgcc-9.2.1-1.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/l/libgcc-10.2.1-9.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/14a7ad9770c7d20998dd7e57e9d98666da9e2abd61bbf529a3c54cb2af67d567",
     ],
 )
 
 http_file(
     name = "libselinux",
-    sha256 = "b75fe6088e737720ea81a9377655874e6ac6919600a5652576f9ebb0d9232e5e",
+    sha256 = "898d9c9911a8e9b6933d3a7e52350f0dbb92e24ba9b00959cfaf451cec43661a",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/libselinux-2.9-5.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libselinux-3.1-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/898d9c9911a8e9b6933d3a7e52350f0dbb92e24ba9b00959cfaf451cec43661a",
     ],
 )
 
 http_file(
     name = "libsepol",
-    sha256 = "2ebd4efba62115da56ed54b7f0a5c2817f9acd29242a0334f62e8c645b81534f",
+    sha256 = "3da666241b0c46a3e6d172e028ce657d02bc6b9c7e2c12757ce629bdfee07a97",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/l/libsepol-2.9-2.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libsepol-3.1-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/3da666241b0c46a3e6d172e028ce657d02bc6b9c7e2c12757ce629bdfee07a97",
     ],
 )
 
 http_file(
     name = "ncurses-base",
-    sha256 = "cbd9d78da00aea6c1e98398fe883d5566971b3bc6764a07c5e945cd317013686",
+    sha256 = "3ba2028d4649a5f9e6c77785e09dc5d711f5856c5c91c923ff3f46ea4430f4df",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/ncurses-base-6.1-12.20190803.fc31.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/ncurses-base-6.2-3.20200222.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/3ba2028d4649a5f9e6c77785e09dc5d711f5856c5c91c923ff3f46ea4430f4df",
     ],
 )
 
 http_file(
     name = "ncurses-lib",
-    sha256 = "7b3ba4cdf8c0f1c4c807435d7b7a4a93ecb02737a95d064f3f20299e5bb3a106",
+    sha256 = "6aa5ec2a16eb602969378982f1d7983acb2fad63198042235224a9e3ebe27e06",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/n/ncurses-libs-6.1-12.20190803.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/ncurses-libs-6.2-3.20200222.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/6aa5ec2a16eb602969378982f1d7983acb2fad63198042235224a9e3ebe27e06",
     ],
 )
 
 http_file(
     name = "pcre2",
-    sha256 = "017d8f5d4abb5f925c1b6d46467020c4fd5e8a8dcb4cc6650cab5627269e99d7",
+    sha256 = "afb45cbdb05dc809cefedd44b5ea1bda59b871ce6bd010252445eb43fd6d361f",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/p/pcre2-10.33-14.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/p/pcre2-10.35-8.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/afb45cbdb05dc809cefedd44b5ea1bda59b871ce6bd010252445eb43fd6d361f",
     ],
 )
 
 http_file(
     name = "setup",
-    sha256 = "4c859170bc4705a8ff4592f7376918fd2a97435c13cde79f24475c0a0866251d",
+    sha256 = "74d8bf336378256d01cbdb40a8972b0c00ea4b7d433a5c9d5dad704ed5188555",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/s/setup-2.13.3-2.fc31.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/s/setup-2.13.7-2.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/74d8bf336378256d01cbdb40a8972b0c00ea4b7d433a5c9d5dad704ed5188555",
     ],
 )
 
 http_file(
     name = "tzdata",
-    sha256 = "f0847b05feed5f47260e38b9ea40935644c061ccde2b82da5c68874190d59034",
+    sha256 = "2f162af6cdbbdae95d5981c4859a00895d6abb3709ba0c20c4138aca69fd002a",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/t/tzdata-2019c-1.fc31.noarch.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/t/tzdata-2020d-1.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/2f162af6cdbbdae95d5981c4859a00895d6abb3709ba0c20c4138aca69fd002a",
     ],
 )
 
 http_file(
     name = "iscsi-initiator-utils",
-    sha256 = "a3fab3da01bfcbeb3cfe223810f55ce6652976d51d07990f59cab2854498d90e",
+    sha256 = "62950607db278f9a9c631e528dec6e8bd00a522b9f9fab69ae4d69000654e62f",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/i/iscsi-initiator-utils-6.2.0.876-10.gitf3c8e90.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/i/iscsi-initiator-utils-6.2.1.1-0.gitac87641.fc33.2.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/62950607db278f9a9c631e528dec6e8bd00a522b9f9fab69ae4d69000654e62f",
     ],
 )
 
 http_file(
     name = "iscsi-initiator-utils-iscsiuio",
-    sha256 = "c557c2145799e5a5e45f8fdab25fd823c63babc36bb131e57c7c0e222ef6a911",
+    sha256 = "9b3d8a210752006a15181de2ea860166040f65e5ce307d439e5abbea8be2655b",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/i/iscsi-initiator-utils-iscsiuio-6.2.0.876-10.gitf3c8e90.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/i/iscsi-initiator-utils-iscsiuio-6.2.1.1-0.gitac87641.fc33.2.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/9b3d8a210752006a15181de2ea860166040f65e5ce307d439e5abbea8be2655b",
     ],
 )
 
 http_file(
     name = "isns-utils-libs",
-    sha256 = "6805cf46806ab4b5975bccdb06bd33612bde50c0e09fbaafdc91d4498a45ea1b",
+    sha256 = "b892675cbd02dd907ee1c09bfcc0158f040f0e634d6a3969fbab02c8a29896a7",
     urls = [
-        "http://download.fedoraproject.org/pub/fedora/linux/releases/31/Everything/x86_64/os/Packages/i/isns-utils-libs-0.97-9.fc31.x86_64.rpm",
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/i/isns-utils-libs-0.97-11.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/b892675cbd02dd907ee1c09bfcc0158f040f0e634d6a3969fbab02c8a29896a7",
+    ],
+)
+
+http_file(
+    name = "nbdkit-server",
+    sha256 = "b22c4949164901295cc84db1d3747fc05b0dc85a9cb0710143005a61919a53de",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-server-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/b22c4949164901295cc84db1d3747fc05b0dc85a9cb0710143005a61919a53de",
+    ],
+)
+
+http_file(
+    name = "nbdkit-basic-filters",
+    sha256 = "51ba4e00f0180ea07b4ed46ca2ded198876bfe67cfe533421cafd0978ed2c7bf",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-basic-filters-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/51ba4e00f0180ea07b4ed46ca2ded198876bfe67cfe533421cafd0978ed2c7bf",
+    ],
+)
+
+http_file(
+    name = "nbdkit-vddk-plugin",
+    sha256 = "cee8f05ab93a9e43aec0d97fcc47997e13d9c277b4c334e77ce5e0b68ac51efc",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-vddk-plugin-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/cee8f05ab93a9e43aec0d97fcc47997e13d9c277b4c334e77ce5e0b68ac51efc",
+    ],
+)
+
+http_file(
+    name = "nbdkit-xz-filter",
+    sha256 = "a77043f110496658d87332b064f34fc10bbf0fdd429c4bbbe9542308ff087007",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-xz-filter-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/a77043f110496658d87332b064f34fc10bbf0fdd429c4bbbe9542308ff087007",
+    ],
+)
+
+http_file(
+    name = "nbdkit-gzip-filter",
+    sha256 = "52787fd9aff69599837328b8b8dd76376999e7c5c96bd72669b0c77a1ac31d4f",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-gzip-filter-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/52787fd9aff69599837328b8b8dd76376999e7c5c96bd72669b0c77a1ac31d4f",
+    ],
+)
+
+http_file(
+    name = "nbdkit-curl-plugin",
+    sha256 = "53412db6df5e098d2439d456a309e567af75b721178a9f7a5c10fa192ecf5d43",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/n/nbdkit-curl-plugin-1.22.3-2.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/53412db6df5e098d2439d456a309e567af75b721178a9f7a5c10fa192ecf5d43",
+    ],
+)
+
+http_file(
+    name = "libxcrypt-compat",
+    sha256 = "51d74854365a393393b4457e3d92ba103c08671b4c881a8a1d9fcb8a54a4a737",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libxcrypt-compat-4.4.17-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/51d74854365a393393b4457e3d92ba103c08671b4c881a8a1d9fcb8a54a4a737",
+    ],
+)
+
+http_file(
+    name = "libxcrypt",
+    sha256 = "a4b3e2d0a10721c22d86fe8517b057fb600addd2a6b9f77f64d5c8b57def627f",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libxcrypt-4.4.17-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/a4b3e2d0a10721c22d86fe8517b057fb600addd2a6b9f77f64d5c8b57def627f",
+    ],
+)
+
+http_file(
+    name = "mkpasswd",
+    sha256 = "6db907dff3ba74017d46db5cd81409971afeebfb9ef529462e8379def5d43cc0",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/m/mkpasswd-5.5.7-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/6db907dff3ba74017d46db5cd81409971afeebfb9ef529462e8379def5d43cc0",
+    ],
+)
+
+http_file(
+    name = "whois-nls",
+    sha256 = "6b5c7c46f0a177bf9c8b89ae3eb251a5e7315424c326cc62871b004bcaed414d",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/w/whois-nls-5.5.7-1.fc33.noarch.rpm",
+        "https://storage.googleapis.com/builddeps/6b5c7c46f0a177bf9c8b89ae3eb251a5e7315424c326cc62871b004bcaed414d",
+    ],
+)
+
+http_file(
+    name = "golang-github-vmware-govmomi",
+    sha256 = "8c58134cdcec8a993c7da827abb4e9ab78d974038d984ff1fee39963d92736c5",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/golang-github-vmware-govmomi-0.23.1-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/8c58134cdcec8a993c7da827abb4e9ab78d974038d984ff1fee39963d92736c5",
+    ],
+)
+
+http_file(
+    name = "libnbd",
+    sha256 = "a63602bb9ebc13f31543332164c64e9c5342089e7431fa35b393f0692b6acb97",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libnbd-1.4.1-2.fc33.1.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/a63602bb9ebc13f31543332164c64e9c5342089e7431fa35b393f0692b6acb97",
+    ],
+)
+
+http_file(
+    name = "liburing",
+    sha256 = "049778a480dd02774934b37c127b345d8748bfbec1e584f9c412a41af34eaf89",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/g/golang-github-vmware-govmomi-0.23.1-1.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/049778a480dd02774934b37c127b345d8748bfbec1e584f9c412a41af34eaf89",
+    ],
+)
+
+http_file(
+    name = "libnbd",
+    sha256 = "a63602bb9ebc13f31543332164c64e9c5342089e7431fa35b393f0692b6acb97",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libnbd-1.4.1-2.fc33.1.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/a63602bb9ebc13f31543332164c64e9c5342089e7431fa35b393f0692b6acb97",
+    ],
+)
+
+http_file(
+    name = "liburing",
+    sha256 = "049778a480dd02774934b37c127b345d8748bfbec1e584f9c412a41af34eaf89",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/updates/33/Everything/x86_64/Packages/l/liburing-0.7-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/049778a480dd02774934b37c127b345d8748bfbec1e584f9c412a41af34eaf89",
+    ],
+)
+
+http_file(
+    name = "libseccomp",
+    sha256 = "964e39835b59c76b7eb3f78c460bfc6e7acfb0c40b901775c7e8a7204537f8a7",
+    urls = [
+        "http://download.fedoraproject.org/pub/fedora/linux/releases/33/Everything/x86_64/os/Packages/l/libseccomp-2.5.0-3.fc33.x86_64.rpm",
+        "https://storage.googleapis.com/builddeps/964e39835b59c76b7eb3f78c460bfc6e7acfb0c40b901775c7e8a7204537f8a7",
     ],
 )
