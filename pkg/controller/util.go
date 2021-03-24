@@ -4,8 +4,9 @@ import (
 	"context"
 	"crypto/rsa"
 	"fmt"
-	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
 	"strings"
+
+	featuregates "kubevirt.io/containerized-data-importer/pkg/feature-gates"
 
 	"github.com/go-logr/logr"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/v2/pkg/apis/volumesnapshot/v1beta1"
@@ -26,6 +27,8 @@ import (
 	"kubevirt.io/containerized-data-importer/pkg/util/cert"
 	"kubevirt.io/containerized-data-importer/pkg/util/naming"
 	sdkapi "kubevirt.io/controller-lifecycle-operator-sdk/pkg/sdk/api"
+
+	ocpconfigv1 "github.com/openshift/api/config/v1"
 )
 
 const (
@@ -72,7 +75,7 @@ const (
 	// AnnMultiStageImportDone marks a multi-stage import as totally finished
 	AnnMultiStageImportDone = AnnAPIGroup + "/storage.checkpoint.done"
 	// AnnPreallocationRequested provides a const to indicate whether preallocation should be performed on the PV
-	AnnPreallocationRequested = AnnAPIGroup + "/storage.preallocacation.requested"
+	AnnPreallocationRequested = AnnAPIGroup + "/storage.preallocation.requested"
 
 	// AnnRunningCondition provides a const for the running condition
 	AnnRunningCondition = AnnAPIGroup + "/storage.condition.running"
@@ -103,6 +106,23 @@ const (
 
 	// Default value for preallocation option if not defined in DV or CDIConfig
 	defaultPreallocation = false
+
+	// ProxyCertVolName is the name of the volumecontaining certs
+	ProxyCertVolName = "cdi-proxy-cert-vol"
+	// ClusterWideProxyAPIGroup is the APIGroup for OpenShift Cluster Wide Proxy
+	ClusterWideProxyAPIGroup = "config.openshift.io"
+	// ClusterWideProxyAPIKind is the APIKind for OpenShift Cluster Wide Proxy
+	ClusterWideProxyAPIKind = "Proxy"
+	// ClusterWideProxyAPIVersion is the APIVersion for OpenShift Cluster Wide Proxy
+	ClusterWideProxyAPIVersion = "v1"
+	// ClusterWideProxyName is the OpenShift Cluster Wide Proxy object name. There is only one obj in the cluster.
+	ClusterWideProxyName = "cluster"
+	// ClusterWideProxyConfigMapName is the OpenShift Cluster Wide Proxy ConfigMap name for CA certificates.
+	ClusterWideProxyConfigMapName = "user-ca-bundle"
+	// ClusterWideProxyConfigMapNameSpace is the OpenShift Cluster Wide Proxy ConfigMap namespace for CA certificates.
+	ClusterWideProxyConfigMapNameSpace = "openshift-config"
+	// ClusterWideProxyConfigMapKey is the OpenShift Cluster Wide Proxy ConfigMap key name for CA certificates.
+	ClusterWideProxyConfigMapKey = "ca-bundle.crt"
 )
 
 const (
@@ -112,6 +132,8 @@ const (
 	AnnPodMultusDefaultNetwork = "v1.multus-cni.io/default-network"
 	// AnnPodSidecarInjection is used for enabling/disabling Pod istio/AspenMesh sidecar injection
 	AnnPodSidecarInjection = "sidecar.istio.io/inject"
+	// AnnPodSidecarInjectionDefault is the default value passed for AnnPodSidecarInjection
+	AnnPodSidecarInjectionDefault = "false"
 )
 
 func checkPVC(pvc *v1.PersistentVolumeClaim, annotation string, log logr.Logger) bool {
@@ -550,7 +572,8 @@ func createScratchNameFromPvc(pvc *v1.PersistentVolumeClaim) string {
 	return naming.GetResourceName(pvc.Name, common.ScratchNameSuffix)
 }
 
-func getPodsUsingPVCs(c client.Client, namespace string, names sets.String, allowReadOnly bool) ([]v1.Pod, error) {
+// GetPodsUsingPVCs returns Pods currently using PVCs
+func GetPodsUsingPVCs(c client.Client, namespace string, names sets.String, allowReadOnly bool) ([]v1.Pod, error) {
 	pl := &v1.PodList{}
 	// hopefully using cached client here
 	err := c.List(context.TODO(), pl, &client.ListOptions{Namespace: namespace})
@@ -626,9 +649,16 @@ func IsPopulated(pvc *v1.PersistentVolumeClaim, c client.Client) (bool, error) {
 
 // SetPodPvcAnnotations applies PVC annotations on the pod
 func SetPodPvcAnnotations(pod *v1.Pod, pvc *v1.PersistentVolumeClaim) {
-	allowedAnnotations := []string{AnnPodNetwork, AnnPodSidecarInjection, AnnPodMultusDefaultNetwork}
-	for _, ann := range allowedAnnotations {
-		if val, ok := pvc.Annotations[ann]; ok {
+	allowedAnnotations := map[string]string{
+		AnnPodNetwork:              "",
+		AnnPodSidecarInjection:     AnnPodSidecarInjectionDefault,
+		AnnPodMultusDefaultNetwork: ""}
+	for ann, def := range allowedAnnotations {
+		val, ok := pvc.Annotations[ann]
+		if !ok && def != "" {
+			val = def
+		}
+		if val != "" {
 			klog.V(1).Info("Applying PVC annotation on the pod", ann, val)
 			if pod.Annotations == nil {
 				pod.Annotations = map[string]string{}
@@ -677,4 +707,47 @@ func GetStorageClassNameForDV(c client.Client, dv *cdiv1.DataVolume) string {
 
 	// If everything fails, return blank
 	return ""
+}
+
+// GetClusterWideProxy returns the OpenShift cluster wide proxy object
+func GetClusterWideProxy(r client.Client) (*ocpconfigv1.Proxy, error) {
+	clusterWideProxy := &ocpconfigv1.Proxy{}
+	if err := r.Get(context.TODO(), types.NamespacedName{Name: ClusterWideProxyName}, clusterWideProxy); err != nil {
+		return nil, err
+	}
+	return clusterWideProxy, nil
+}
+
+// GetImportProxyConfig attempts to import proxy URLs if configured in the CDIConfig.
+func GetImportProxyConfig(config *cdiv1.CDIConfig, field string) (string, error) {
+	if config == nil {
+		return "", errors.Errorf("failed to get field, the CDIConfig is nil\n")
+	}
+	if config.Status.ImportProxy == nil {
+		return "", errors.Errorf("failed to get field, the CDIConfig ImportProxy is nil\n")
+	}
+
+	switch field {
+	case common.ImportProxyHTTP:
+		if config.Status.ImportProxy.HTTPProxy != nil {
+			return *config.Status.ImportProxy.HTTPProxy, nil
+		}
+	case common.ImportProxyHTTPS:
+		if config.Status.ImportProxy.HTTPSProxy != nil {
+			return *config.Status.ImportProxy.HTTPSProxy, nil
+		}
+	case common.ImportProxyNoProxy:
+		if config.Status.ImportProxy.NoProxy != nil {
+			return *config.Status.ImportProxy.NoProxy, nil
+		}
+	case common.ImportProxyConfigMapName:
+		if config.Status.ImportProxy.TrustedCAProxy != nil {
+			return *config.Status.ImportProxy.TrustedCAProxy, nil
+		}
+	default:
+		return "", errors.Errorf("CDIConfig ImportProxy does not have the field: %s\n", field)
+	}
+
+	// If everything fails, return blank
+	return "", nil
 }

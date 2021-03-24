@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	pollingInterval = 2 * time.Second
-	timeout         = 270 * time.Second
+	fastPollingInterval = 20 * time.Millisecond
+	pollingInterval     = 2 * time.Second
+	timeout             = 270 * time.Second
+	shortTimeout        = 30 * time.Second
 )
 
 var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", func() {
@@ -217,7 +219,6 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 			readyCondition   *cdiv1.DataVolumeCondition
 			boundCondition   *cdiv1.DataVolumeCondition
 			runningCondition *cdiv1.DataVolumeCondition
-			skipOpenshift    bool
 		}
 
 		createImageIoDataVolume := func(dataVolumeName, size, url string) *cdiv1.DataVolume {
@@ -257,9 +258,6 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 		}
 
 		table.DescribeTable("should", func(args dataVolumeTestArguments) {
-			if IsOpenshift(f.K8sClient) && args.skipOpenshift {
-				Skip("Test not expected to pass on OpenShift")
-			}
 			// Have to call the function in here, to make sure the BeforeEach in the Framework has run.
 			dataVolume := args.dvFunc(args.name, args.size, args.url())
 			startTime := time.Now()
@@ -314,7 +312,10 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 				if args.checkPermissions {
 					// Verify the created disk image has the right permissions.
 					By("Verifying permissions are 660")
-					Expect(f.VerifyPermissions(f.Namespace, pvc)).To(BeTrue(), "Permissions on disk image are not 660")
+					Eventually(func() bool {
+						result, _ := f.VerifyPermissions(f.Namespace, pvc)
+						return result
+					}, shortTimeout, pollingInterval).Should(BeTrue(), "Permissions on disk image are not 660")
 					err := utils.DeleteVerifierPod(f.K8sClient, f.Namespace.Name)
 					Expect(err).ToNot(HaveOccurred())
 				}
@@ -426,7 +427,6 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 					Message: "Unable to process data: Invalid format qcow for image",
 					Reason:  "Error",
 				},
-				skipOpenshift: true,
 			}),
 			table.Entry("[rfe_id:1120][crit:high][posneg:negative][test_id:2554]fail creating import dv: invalid qcow large json", dataVolumeTestArguments{
 				name:         "dv-invalid-qcow-large-json",
@@ -1003,6 +1003,7 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 		verifyAnnotations := func(pod *v1.Pod) {
 			By("verifying passed annotation")
 			Expect(pod.Annotations[controller.AnnPodNetwork]).To(Equal("net1"))
+			Expect(pod.Annotations[controller.AnnPodSidecarInjection]).To(Equal(controller.AnnPodSidecarInjectionDefault))
 			By("verifying non-passed annotation")
 			Expect(pod.Annotations["annot1"]).ToNot(Equal("value1"))
 		}
@@ -1111,7 +1112,7 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component]DataVolume tests", 
 						uploadPod, _ = utils.FindPodByPrefix(f.K8sClient, dataVolume.Namespace, "cdi-upload", common.CDILabelSelector)
 					}
 					return sourcePod != nil && uploadPod != nil
-				}, timeout, pollingInterval).Should(BeTrue())
+				}, timeout, fastPollingInterval).Should(BeTrue())
 				verifyAnnotations(sourcePod)
 				verifyAnnotations(uploadPod)
 			}

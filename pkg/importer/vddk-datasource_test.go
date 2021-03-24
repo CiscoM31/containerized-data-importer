@@ -6,7 +6,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"net/url"
-	"os/exec"
+	"os"
 
 	libnbd "github.com/mrnold/go-libnbd"
 	. "github.com/onsi/ginkgo"
@@ -15,6 +15,7 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	v1 "k8s.io/api/core/v1"
+	"kubevirt.io/containerized-data-importer/pkg/image"
 )
 
 const (
@@ -46,6 +47,7 @@ var _ = Describe("VDDK data source", func() {
 		newVddkDataSink = createMockVddkDataSink
 		newVMwareClient = createMockVMwareClient
 		newNbdKitWrapper = createMockNbdKitWrapper
+		newTerminationChannel = createMockTerminationChannel
 		currentExport = defaultMockNbdExport()
 		currentVMwareFunctions = defaultMockVMwareFunctions()
 	})
@@ -300,6 +302,45 @@ var _ = Describe("VDDK data source", func() {
 			Expect(extent.Length).To(Equal(source.ChangedBlocks.ChangedArea[index].Length))
 		}
 	})
+
+	It("should not crash when the disk is not found and has no snapshots", func() {
+		newVddkDataSource = createVddkDataSource
+		diskName := "testdisk.vmdk"
+		wrongDiskName := "wrong.vmdk"
+
+		currentVMwareFunctions.Properties = func(ctx context.Context, ref types.ManagedObjectReference, property []string, result interface{}) error {
+			switch out := result.(type) {
+			case *mo.VirtualMachine:
+				if property[0] == "config.hardware.device" {
+					out.Config = createVirtualDiskConfig(wrongDiskName, 12345)
+				}
+			}
+			return nil
+		}
+
+		_, err := NewVDDKDataSource("http://vcenter.test", "user", "pass", "aa:bb:cc:dd", "1-2-3-4", diskName, "", "", "false", v1.PersistentVolumeFilesystem)
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(Equal("disk 'testdisk.vmdk' is not present in VM hardware config or snapshot list"))
+	})
+
+	It("should cancel transfer on SIGTERM", func() {
+		newVddkDataSource = createVddkDataSource
+		diskName := "testdisk.vmdk"
+
+		currentVMwareFunctions.Properties = func(ctx context.Context, ref types.ManagedObjectReference, property []string, result interface{}) error {
+			switch out := result.(type) {
+			case *mo.VirtualMachine:
+				if property[0] == "config.hardware.device" {
+					out.Config = createVirtualDiskConfig(diskName, 12345)
+				}
+			}
+			return nil
+		}
+		_, err := NewVDDKDataSource("http://vcenter.test", "user", "pass", "aa:bb:cc:dd", "1-2-3-4", diskName, "snapshot-1", "snapshot-2", "false", v1.PersistentVolumeFilesystem)
+		Expect(err).ToNot(HaveOccurred())
+		mockTerminationChannel <- os.Interrupt
+		Expect(err).ToNot(HaveOccurred())
+	})
 })
 
 type mockNbdOperations struct{}
@@ -334,9 +375,9 @@ func createMockVddkDataSource(endpoint string, accessKey string, secKey string, 
 	handle := &mockNbdOperations{}
 
 	nbdkit := &NbdKitWrapper{
-		Command: nil,
-		Socket:  socketURL,
-		Handle:  handle,
+		n:      &image.Nbdkit{},
+		Socket: socketURL,
+		Handle: handle,
 	}
 
 	return &VDDKDataSource{
@@ -452,9 +493,9 @@ func createMockVMwareClient(endpoint string, accessKey string, secKey string, th
 func createMockNbdKitWrapper(vmware *VMwareClient, diskFileName string) (*NbdKitWrapper, error) {
 	u, _ := url.Parse("http://vcenter.test")
 	return &NbdKitWrapper{
-		Command: &exec.Cmd{},
-		Socket:  u,
-		Handle:  &mockNbdOperations{},
+		n:      &image.Nbdkit{},
+		Socket: u,
+		Handle: &mockNbdOperations{},
 	}, nil
 }
 

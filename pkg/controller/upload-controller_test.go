@@ -215,17 +215,30 @@ var _ = Describe("Upload controller reconcile loop", func() {
 
 	})
 
-	It("Should return err and not clone if validation error occurs", func() {
+	It("Should return err and not clone if source and content type do not match", func() {
 		storageClassName := "test"
 		testPvc := createPvcInStorageClass("testPvc1", "default", &storageClassName, map[string]string{cloneRequestAnnotation: "default/sourcePvc"}, nil, corev1.ClaimBound)
-		sourcePvc := createPvcInStorageClass("sourcePvc", "default", &storageClassName, nil, nil, corev1.ClaimBound)
+		sourcePvc := createPvcInStorageClass("sourcePvc", "default", &storageClassName, map[string]string{AnnContentType: "archive"}, nil, corev1.ClaimBound)
 		vm := corev1.PersistentVolumeBlock
 		sourcePvc.Spec.VolumeMode = &vm
 		reconciler := createUploadReconciler(testPvc, sourcePvc)
 
 		_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: "testPvc1", Namespace: "default"}})
 		Expect(err).To(HaveOccurred())
-		Expect(err.Error()).To(ContainSubstring("Source and target volume Modes do not match"))
+		Expect(err.Error()).To(ContainSubstring("source contentType (archive) and target contentType (kubevirt) do not match"))
+	})
+
+	It("Should return err and not clone if source and target volume modes do not match, and content type is not kubevirt", func() {
+		storageClassName := "test"
+		testPvc := createPvcInStorageClass("testPvc1", "default", &storageClassName, map[string]string{AnnContentType: "archive", cloneRequestAnnotation: "default/sourcePvc"}, nil, corev1.ClaimBound)
+		sourcePvc := createPvcInStorageClass("sourcePvc", "default", &storageClassName, map[string]string{AnnContentType: "archive"}, nil, corev1.ClaimBound)
+		vm := corev1.PersistentVolumeBlock
+		sourcePvc.Spec.VolumeMode = &vm
+		reconciler := createUploadReconciler(testPvc, sourcePvc)
+
+		_, err := reconciler.Reconcile(reconcile.Request{NamespacedName: types.NamespacedName{Name: "testPvc1", Namespace: "default"}})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("Source and target volume modes do not match, and content type is not kubevirt"))
 	})
 
 	It("Should return nil and create a pod and service when a clone pvc", func() {
@@ -311,6 +324,7 @@ var _ = Describe("reconcilePVC loop", func() {
 			Expect(uploadPod.Name).To(Equal(uploadResourceName))
 			Expect(uploadPod.Labels[common.UploadTargetLabel]).To(Equal(string(testPvc.UID)))
 			Expect(uploadPod.GetAnnotations()[AnnPodNetwork]).To(Equal("net1"))
+			Expect(uploadPod.GetAnnotations()[AnnPodSidecarInjection]).To(Equal(AnnPodSidecarInjectionDefault))
 
 			uploadService = &corev1.Service{}
 			err = reconciler.client.Get(context.TODO(), types.NamespacedName{Name: naming.GetServiceNameFromResourceName(uploadResourceName), Namespace: "default"}, uploadService)

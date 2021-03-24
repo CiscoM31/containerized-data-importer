@@ -1098,7 +1098,7 @@ var _ = Describe("Preallocation", func() {
 
 		pvc, err = utils.FindPVC(f.K8sClient, dataVolume.Namespace, dataVolume.Name)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(pvc.GetAnnotations()[controller.AnnPreallocationApplied]).Should(Or(Equal("true"), Equal("skipped")))
+		Expect(pvc.GetAnnotations()[controller.AnnPreallocationApplied]).Should(Equal("true"))
 	})
 
 	It("Uploader should not add preallocation when preallocation=false", func() {
@@ -1175,7 +1175,7 @@ var _ = Describe("Preallocation", func() {
 		Expect(token).ToNot(BeEmpty())
 
 		By("Do upload")
-		err = uploadImage(uploadProxyURL, token, http.StatusOK)
+		err = uploader(uploadProxyURL, token, http.StatusOK)
 		Expect(err).ToNot(HaveOccurred())
 
 		phase = cdiv1.Succeeded
@@ -1185,7 +1185,7 @@ var _ = Describe("Preallocation", func() {
 
 		pvc, err = utils.FindPVC(f.K8sClient, dataVolume.Namespace, dataVolume.Name)
 		Expect(err).ToNot(HaveOccurred())
-		Expect(pvc.GetAnnotations()[controller.AnnPreallocationApplied]).Should(Or(Equal("true"), Equal("skipped")))
+		Expect(pvc.GetAnnotations()[controller.AnnPreallocationApplied]).Should(Equal("true"))
 	},
 		Entry("sync", uploadImage),
 		Entry("async", uploadImageAsync),

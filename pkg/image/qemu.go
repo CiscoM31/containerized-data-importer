@@ -23,6 +23,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -78,7 +79,13 @@ var (
 		},
 		[]string{"ownerUID"},
 	)
-	ownerUID string
+	ownerUID             string
+	preallocationMethods = [][]string{
+		{"-o", "preallocation=falloc"},
+		{"-o", "preallocation=full"},
+		{"-S", "0"},
+	}
+	maxPreallocationMethods = len(preallocationMethods)
 )
 
 func init() {
@@ -101,11 +108,14 @@ func NewQEMUOperations() QEMUOperations {
 
 func convertToRaw(src, dest string, preallocate bool) error {
 	args := []string{"convert", "-t", "none", "-p", "-O", "raw", src, dest}
+	var err error
 	if preallocate {
-		klog.V(1).Info("Added preallocation")
-		args = append(args, []string{"-o", "preallocation=falloc"}...)
+		err = addPreallocation(preallocate, args, func(args []string) ([]byte, error) {
+			return qemuExecFunction(nil, reportProgress, "qemu-img", args...)
+		})
+	} else {
+		_, err = qemuExecFunction(nil, reportProgress, "qemu-img", args...)
 	}
-	_, err := qemuExecFunction(nil, nil, "qemu-img", args...)
 	if err != nil {
 		os.Remove(dest)
 		return errors.Wrap(err, "could not convert image to raw")
@@ -115,19 +125,22 @@ func convertToRaw(src, dest string, preallocate bool) error {
 }
 
 func (o *qemuOperations) ConvertToRawStream(url *url.URL, dest string, preallocate bool) error {
-	if len(url.Scheme) == 0 {
+	if len(url.Scheme) == 0 || url.Scheme == "nbd" {
 		// File, instead of URL
 		return convertToRaw(url.String(), dest, preallocate)
 	}
 
 	jsonArg := fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", url.Scheme, url, networkTimeoutSecs)
 
+	var err error
 	args := []string{"convert", "-t", "none", "-p", "-O", "raw", jsonArg, dest}
 	if preallocate {
-		klog.V(1).Info("Added preallocation")
-		args = append(args, []string{"-o", "preallocation=falloc"}...)
+		err = addPreallocation(preallocate, args, func(args []string) ([]byte, error) {
+			return qemuExecFunction(nil, reportProgress, "qemu-img", args...)
+		})
+	} else {
+		_, err = qemuExecFunction(nil, reportProgress, "qemu-img", args...)
 	}
-	_, err := qemuExecFunction(nil, reportProgress, "qemu-img", args...)
 	if err != nil {
 		// TODO: Determine what to do here, the conversion failed, and we need to clean up the mess, but we could be writing to a block device
 		os.Remove(dest)
@@ -179,14 +192,18 @@ func Info(url *url.URL) (*ImgInfo, error) {
 func (o *qemuOperations) Info(url *url.URL) (*ImgInfo, error) {
 	var output []byte
 	var err error
+	var source string
 
-	if len(url.Scheme) > 0 {
+	switch {
+	case url.Scheme == "nbd":
+		source = url.String()
+	case len(url.Scheme) > 0:
 		// Image is a URL, make sure the timeout is long enough.
-		jsonArg := fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", url.Scheme, url, networkTimeoutSecs)
-		output, err = qemuExecFunction(qemuInfoLimits, nil, "qemu-img", "info", "--output=json", jsonArg)
-	} else {
-		output, err = qemuExecFunction(qemuInfoLimits, nil, "qemu-img", "info", "--output=json", url.String())
+		source = fmt.Sprintf("json: {\"file.driver\": \"%s\", \"file.url\": \"%s\", \"file.timeout\": %d}", url.Scheme, url, networkTimeoutSecs)
+	default:
+		source = url.String()
 	}
+	output, err = qemuExecFunction(qemuInfoLimits, nil, "qemu-img", "info", "--output=json", source)
 	if err != nil {
 		return nil, errors.Errorf("%s, %s", output, err.Error())
 	}
@@ -290,4 +307,24 @@ func PreallocateBlankBlock(dest string, size resource.Quantity) error {
 	}
 
 	return nil
+}
+
+func addPreallocation(preallocate bool, args []string, fn func(args []string) ([]byte, error)) error {
+	var err error
+	preallocationMethod := 0
+	for retry := true; retry; retry = err != nil && preallocationMethod < maxPreallocationMethods {
+		var argsToTry []string
+		var output []byte
+		if preallocate {
+			klog.V(1).Info("Added preallocation")
+			argsToTry = append(args, preallocationMethods[preallocationMethod]...)
+		}
+		output, err = fn(argsToTry)
+		if err != nil && strings.Contains(string(output), "Unsupported preallocation mode") {
+			preallocationMethod++
+			klog.V(1).Infof("Unsupported preallocation mode. Retrying with %s", preallocationMethods[preallocationMethod])
+		}
+	}
+
+	return err
 }

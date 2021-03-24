@@ -90,14 +90,14 @@ const (
 	// creatingScratch provides a const to indicate scratch is being created.
 	creatingScratch = "CreatingScratchSpace"
 
+	// awaitingVddk provides a const to indicate the PVC is waiting for a VDDK image
+	awaitingVddk = "AwaitingVDDK"
+
 	// ImportTargetInUse is reason for event created when an import pvc is in use
 	ImportTargetInUse = "ImportTargetInUse"
 
 	// PreallocationApplied is a string inserted into importer's/uploader's exit message
 	PreallocationApplied = "Preallocation applied"
-
-	// PreallocationSkipped is a string inserted into importer's/uploader's exit message
-	PreallocationSkipped = "Preallocation skipped"
 )
 
 // ImportReconciler members
@@ -131,6 +131,10 @@ type importPodEnvVar struct {
 	previousCheckpoint string
 	finalCheckpoint    string
 	preallocation      bool
+	httpProxy          string
+	httpsProxy         string
+	noProxy            string
+	certConfigMapProxy string
 }
 
 // NewImportController creates a new instance of the import controller.
@@ -178,11 +182,10 @@ func addImportControllerWatches(mgr manager.Manager, importController controller
 	return nil
 }
 
-func shouldReconcilePVC(pvc *corev1.PersistentVolumeClaim,
-	isImmediateBindingRequested bool,
-	featureGates featuregates.FeatureGates,
+func (r *ImportReconciler) shouldReconcilePVC(pvc *corev1.PersistentVolumeClaim,
 	log logr.Logger) (bool, error) {
-	waitForFirstConsumerEnabled, err := isWaitForFirstConsumerEnabled(isImmediateBindingRequested, featureGates)
+	_, isImmediateBindingRequested := pvc.Annotations[AnnImmediateBinding]
+	waitForFirstConsumerEnabled, err := isWaitForFirstConsumerEnabled(isImmediateBindingRequested, r.featureGates)
 
 	if err != nil {
 		return false, err
@@ -211,9 +214,8 @@ func (r *ImportReconciler) Reconcile(req reconcile.Request) (reconcile.Result, e
 		}
 		return reconcile.Result{}, err
 	}
-	_, isImmediateBindingRequested := pvc.Annotations[AnnImmediateBinding]
 
-	shouldReconcile, err := shouldReconcilePVC(pvc, isImmediateBindingRequested, r.featureGates, log)
+	shouldReconcile, err := r.shouldReconcilePVC(pvc, log)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -273,7 +275,7 @@ func (r *ImportReconciler) reconcilePvc(pvc *corev1.PersistentVolumeClaim, log l
 			// Don't create the POD if the PVC is completed already
 			log.V(1).Info("PVC is already complete")
 		} else if pvc.DeletionTimestamp == nil {
-			podsUsingPVC, err := getPodsUsingPVCs(r.client, pvc.Namespace, sets.NewString(pvc.Name), false)
+			podsUsingPVC, err := GetPodsUsingPVCs(r.client, pvc.Namespace, sets.NewString(pvc.Name), false)
 			if err != nil {
 				return reconcile.Result{}, err
 			}
@@ -373,9 +375,6 @@ func (r *ImportReconciler) updatePvcFromPod(pvc *corev1.PersistentVolumeClaim, p
 		if strings.Contains(pod.Status.ContainerStatuses[0].State.Terminated.Message, PreallocationApplied) {
 			anno[AnnPreallocationApplied] = "true"
 		}
-		if strings.Contains(pod.Status.ContainerStatuses[0].State.Terminated.Message, PreallocationSkipped) {
-			anno[AnnPreallocationApplied] = "skipped"
-		}
 	}
 
 	if anno[AnnCurrentCheckpoint] != "" {
@@ -457,6 +456,13 @@ func (r *ImportReconciler) createImporterPod(pvc *corev1.PersistentVolumeClaim) 
 		r.log.V(1).Info("Pod requires VDDK sidecar for VMware transfer")
 		vddkImageName, err = r.getVddkImageName()
 		if err != nil {
+			anno := pvc.GetAnnotations()
+			anno[AnnBoundCondition] = "false"
+			anno[AnnBoundConditionMessage] = fmt.Sprintf("waiting for %s configmap for VDDK image", common.VddkConfigMap)
+			anno[AnnBoundConditionReason] = awaitingVddk
+			if updateErr := r.updatePVC(pvc, r.log); updateErr != nil {
+				return updateErr
+			}
 			return err
 		}
 	}
@@ -484,7 +490,7 @@ func (r *ImportReconciler) createImporterPod(pvc *corev1.PersistentVolumeClaim) 
 func (r *ImportReconciler) createImportEnvVar(pvc *corev1.PersistentVolumeClaim) (*importPodEnvVar, error) {
 	podEnvVar := &importPodEnvVar{}
 	podEnvVar.source = getSource(pvc)
-	podEnvVar.contentType = getContentType(pvc)
+	podEnvVar.contentType = GetContentType(pvc)
 
 	var err error
 	if podEnvVar.source != SourceNone {
@@ -496,15 +502,13 @@ func (r *ImportReconciler) createImportEnvVar(pvc *corev1.PersistentVolumeClaim)
 		if podEnvVar.secretName == "" {
 			r.log.V(2).Info("no secret will be supplied to endpoint", "endPoint", podEnvVar.ep)
 		}
+		//get the CDIConfig to extract the proxy configuration to be used to import an image
+		cdiConfig := &cdiv1.CDIConfig{}
+		r.client.Get(context.TODO(), types.NamespacedName{Name: common.ConfigName}, cdiConfig)
 		podEnvVar.certConfigMap, err = r.getCertConfigMap(pvc)
 		if err != nil {
 			return nil, err
 		}
-		fsOverhead, err := GetFilesystemOverhead(r.client, pvc)
-		if err != nil {
-			return nil, err
-		}
-		podEnvVar.filesystemOverhead = string(fsOverhead)
 		podEnvVar.insecureTLS, err = r.isInsecureTLS(pvc)
 		if err != nil {
 			return nil, err
@@ -516,7 +520,31 @@ func (r *ImportReconciler) createImportEnvVar(pvc *corev1.PersistentVolumeClaim)
 		podEnvVar.previousCheckpoint = getValueFromAnnotation(pvc, AnnPreviousCheckpoint)
 		podEnvVar.currentCheckpoint = getValueFromAnnotation(pvc, AnnCurrentCheckpoint)
 		podEnvVar.finalCheckpoint = getValueFromAnnotation(pvc, AnnFinalCheckpoint)
+
+		var field string
+		if field, err = GetImportProxyConfig(cdiConfig, common.ImportProxyHTTP); err != nil {
+			r.log.V(3).Info("no proxy http url will be supplied:", err.Error())
+		}
+		podEnvVar.httpProxy = field
+		if field, err = GetImportProxyConfig(cdiConfig, common.ImportProxyHTTPS); err != nil {
+			r.log.V(3).Info("no proxy https url will be supplied:", err.Error())
+		}
+		podEnvVar.httpsProxy = field
+		if field, err = GetImportProxyConfig(cdiConfig, common.ImportProxyNoProxy); err != nil {
+			r.log.V(3).Info("the noProxy field will not be supplied:", err.Error())
+		}
+		podEnvVar.noProxy = field
+		if field, err = GetImportProxyConfig(cdiConfig, common.ImportProxyConfigMapName); err != nil {
+			r.log.V(3).Info("no proxy CA certiticate will be supplied:", err.Error())
+		}
+		podEnvVar.certConfigMapProxy = field
 	}
+
+	fsOverhead, err := GetFilesystemOverhead(r.client, pvc)
+	if err != nil {
+		return nil, err
+	}
+	podEnvVar.filesystemOverhead = string(fsOverhead)
 
 	if preallocation, err := strconv.ParseBool(getValueFromAnnotation(pvc, AnnPreallocationRequested)); err == nil {
 		podEnvVar.preallocation = preallocation
@@ -612,7 +640,7 @@ func (r *ImportReconciler) getSecretName(pvc *corev1.PersistentVolumeClaim) stri
 
 func (r *ImportReconciler) requiresScratchSpace(pvc *corev1.PersistentVolumeClaim) bool {
 	scratchRequired := false
-	contentType := getContentType(pvc)
+	contentType := GetContentType(pvc)
 	// All archive requires scratch space.
 	if contentType == "archive" {
 		scratchRequired = true
@@ -702,11 +730,11 @@ func getSource(pvc *corev1.PersistentVolumeClaim) string {
 	return source
 }
 
-// returns the source string which determines the type of source. If no source or invalid source found, default to http
-func getContentType(pvc *corev1.PersistentVolumeClaim) string {
+// GetContentType returns the content type of the source image. If invalid or not set, default to kubevirt
+func GetContentType(pvc *corev1.PersistentVolumeClaim) string {
 	contentType, found := pvc.Annotations[AnnContentType]
 	if !found {
-		contentType = ""
+		return string(cdiv1.DataVolumeKubeVirt)
 	}
 	switch contentType {
 	case
@@ -928,6 +956,15 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 		pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 	}
 
+	if podEnvVar.certConfigMapProxy != "" {
+		vm := corev1.VolumeMount{
+			Name:      ProxyCertVolName,
+			MountPath: common.ImporterProxyCertDir,
+		}
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, vm)
+		pod.Spec.Volumes = append(pod.Spec.Volumes, createProxyConfigMapVolume(CertVolName, podEnvVar.certConfigMapProxy))
+	}
+
 	if podEnvVar.contentType == string(cdiv1.DataVolumeKubeVirt) {
 		// Set the fsGroup on the security context to the QemuSubGid
 		if pod.Spec.SecurityContext == nil {
@@ -938,6 +975,19 @@ func makeImporterPodSpec(namespace, image, verbose, pullPolicy string, podEnvVar
 	}
 	SetPodPvcAnnotations(pod, pvc)
 	return pod
+}
+
+func createProxyConfigMapVolume(certVolName, objRef string) corev1.Volume {
+	return corev1.Volume{
+		Name: CertVolName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: objRef,
+				},
+			},
+		},
+	}
 }
 
 // this is being called for pods using PV with filesystem volume mode
@@ -999,6 +1049,18 @@ func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []corev1.EnvVar {
 			Value: podEnvVar.thumbprint,
 		},
 		{
+			Name:  common.ImportProxyHTTP,
+			Value: podEnvVar.httpProxy,
+		},
+		{
+			Name:  common.ImportProxyHTTPS,
+			Value: podEnvVar.httpsProxy,
+		},
+		{
+			Name:  common.ImportProxyNoProxy,
+			Value: podEnvVar.noProxy,
+		},
+		{
 			Name:  common.ImporterCurrentCheckpoint,
 			Value: podEnvVar.currentCheckpoint,
 		},
@@ -1043,6 +1105,12 @@ func makeImportEnv(podEnvVar *importPodEnvVar, uid types.UID) []corev1.EnvVar {
 		env = append(env, corev1.EnvVar{
 			Name:  common.ImporterCertDirVar,
 			Value: common.ImporterCertDir,
+		})
+	}
+	if podEnvVar.certConfigMapProxy != "" {
+		env = append(env, corev1.EnvVar{
+			Name:  common.ImporterProxyCertDirVar,
+			Value: common.ImporterProxyCertDir,
 		})
 	}
 	return env

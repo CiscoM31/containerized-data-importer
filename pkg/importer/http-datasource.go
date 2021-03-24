@@ -36,12 +36,15 @@ import (
 	"k8s.io/klog/v2"
 
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1beta1"
+	"kubevirt.io/containerized-data-importer/pkg/common"
 	"kubevirt.io/containerized-data-importer/pkg/image"
 	"kubevirt.io/containerized-data-importer/pkg/util"
 )
 
 const (
-	tempFile = "tmpimage"
+	tempFile     = "tmpimage"
+	nbdkitPid    = "/var/run/nbdkit.pid"
+	nbdkitSocket = "/var/run/nbdkit.sock"
 )
 
 // HTTPDataSource is the data provider for http(s) endpoints.
@@ -71,8 +74,10 @@ type HTTPDataSource struct {
 	// the content length reported by the http server.
 	contentLength uint64
 
-	n *image.Nbdkit
+	n image.NbdkitOperation
 }
+
+var createNbdkitCurl = image.NewNbdkitCurl
 
 // NewHTTPDataSource creates a new instance of the http data provider.
 func NewHTTPDataSource(endpoint, accessKey, secKey, certDir string, contentType cdiv1.DataVolumeContentType) (*HTTPDataSource, error) {
@@ -100,6 +105,7 @@ func NewHTTPDataSource(endpoint, accessKey, secKey, certDir string, contentType 
 		brokenForQemuImg: brokenForQemuImg,
 		contentLength:    contentLength,
 	}
+	httpSource.n = createNbdkitCurl(nbdkitPid, certDir, nbdkitSocket)
 	// We know this is a counting reader, so no need to check.
 	countingReader := httpReader.(*util.CountingReader)
 	go httpSource.pollProgress(countingReader, 10*time.Minute, time.Second)
@@ -125,7 +131,8 @@ func (hs *HTTPDataSource) Info() (ProcessingPhase, error) {
 		// We can pass straight to conversion from the endpoint
 		return ProcessingPhaseConvert, nil
 	}
-	hs.n = image.NewNbdkitCurl("/var/run/nbdkit.pid", hs.customCA)
+	hs.url, _ = url.Parse(fmt.Sprintf("nbd:unix:%s", nbdkitSocket))
+
 	if hs.readers.ArchiveGz {
 		hs.n.AddFilter(image.NbdkitGzipFilter)
 		klog.V(2).Infof("Added nbdkit gzip filter")
@@ -134,7 +141,10 @@ func (hs *HTTPDataSource) Info() (ProcessingPhase, error) {
 		hs.n.AddFilter(image.NbdkitXzFilter)
 		klog.V(2).Infof("Added nbdkit xz filter")
 	}
-	qemuOperations = image.NewNbdkitOperations(hs.GetNbdkit())
+
+	if err := hs.n.StartNbdkit(hs.endpoint.String()); err != nil {
+		return ProcessingPhaseError, err
+	}
 	return ProcessingPhaseConvert, nil
 }
 
@@ -179,11 +189,6 @@ func (hs *HTTPDataSource) GetURL() *url.URL {
 	return hs.url
 }
 
-// GetNbdkit returns the nbdkit instance of the importer
-func (hs *HTTPDataSource) GetNbdkit() *image.Nbdkit {
-	return hs.n
-}
-
 // Close all readers.
 func (hs *HTTPDataSource) Close() error {
 	var err error
@@ -214,6 +219,20 @@ func createHTTPClient(certDir string) (*http.Client, error) {
 		return nil, errors.Wrap(err, "Error getting system certs")
 	}
 
+	// append the user-provided trusted CA certificates bundle when making egress connections using proxy
+	if files, err := ioutil.ReadDir(common.ImporterProxyCertDir); err == nil {
+		for _, file := range files {
+			if file.IsDir() || file.Name()[0] == '.' {
+				continue
+			}
+			fp := path.Join(common.ImporterProxyCertDir, file.Name())
+			if certs, err := ioutil.ReadFile(fp); err == nil {
+				certPool.AppendCertsFromPEM(certs)
+			}
+		}
+	}
+
+	// append server CA certificates
 	files, err := ioutil.ReadDir(certDir)
 	if err != nil {
 		return nil, errors.Wrapf(err, "Error listing files in %s", certDir)
@@ -238,11 +257,12 @@ func createHTTPClient(certDir string) (*http.Client, error) {
 		}
 	}
 
-	client.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs: certPool,
-		},
+	// the default transport contains Proxy configurations to use environment variables and default timeouts
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		RootCAs: certPool,
 	}
+	client.Transport = transport
 
 	return client, nil
 }

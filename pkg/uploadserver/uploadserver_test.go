@@ -88,12 +88,12 @@ func newHTTPClient(clientKeyPair *triple.KeyPair, serverCACert *x509.Certificate
 	return client
 }
 
-func saveProcessorSuccess(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (common.PreallocationStatus, error) {
-	return common.PreallocationNotApplied, nil
+func saveProcessorSuccess(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (bool, error) {
+	return false, nil
 }
 
-func saveProcessorFailure(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (common.PreallocationStatus, error) {
-	return common.PreallocationNotApplied, fmt.Errorf("Error using datastream")
+func saveProcessorFailure(stream io.ReadCloser, dest, imageSize string, filesystemOverhead float64, preallocation bool, contentType string) (bool, error) {
+	return false, fmt.Errorf("Error using datastream")
 }
 
 func withProcessorSuccess(f func()) {
@@ -104,7 +104,7 @@ func withProcessorFailure(f func()) {
 	replaceProcessorFunc(saveProcessorFailure, f)
 }
 
-func replaceProcessorFunc(replacement func(io.ReadCloser, string, string, float64, bool, string) (common.PreallocationStatus, error), f func()) {
+func replaceProcessorFunc(replacement func(io.ReadCloser, string, string, float64, bool, string) (bool, error), f func()) {
 	origProcessorFunc := uploadProcessorFunc
 	uploadProcessorFunc = replacement
 	defer func() {
@@ -192,7 +192,7 @@ var _ = Describe("Upload server tests", func() {
 		})
 	})
 
-	It("healthz", func() {
+	It("healthz fails without the uploadserver", func() {
 		req, err := http.NewRequest("GET", healthzPath, nil)
 		Expect(err).ToNot(HaveOccurred())
 
@@ -203,7 +203,7 @@ var _ = Describe("Upload server tests", func() {
 		server.Handler.ServeHTTP(rr, req)
 
 		status := rr.Code
-		Expect(status).To(Equal(http.StatusOK))
+		Expect(status).To(Equal(http.StatusInternalServerError))
 
 	})
 

@@ -1,6 +1,7 @@
 package common
 
 import (
+	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -50,6 +51,12 @@ const (
 	ImporterCertDir = "/certs"
 	// DefaultPullPolicy imports k8s "IfNotPresent" string for the import_controller_gingko_test and the cdi-controller executable
 	DefaultPullPolicy = string(v1.PullIfNotPresent)
+	// ImportProxyConfigMapName provides the name of the ConfigMap in the cdi namespace containing a CA certificate bundle
+	ImportProxyConfigMapName = "trusted-ca-proxy-bundle-cm"
+	// ImportProxyConfigMapKey provides the key name of the ConfigMap in the cdi namespace containing a CA certificate bundle
+	ImportProxyConfigMapKey = "ca.pem"
+	// ImporterProxyCertDir is where the configmap containing proxy certs will be mounted
+	ImporterProxyCertDir = "/proxycerts/"
 
 	// PullPolicy provides a constant to capture our env variable "PULL_POLICY" (only used by cmd/cdi-controller/controller.go)
 	PullPolicy = "PULL_POLICY"
@@ -85,6 +92,14 @@ const (
 	ImporterFinalCheckpoint = "IMPORTER_FINAL_CHECKPOINT"
 	// Preallocation provides a constant to capture out env variable "PREALLOCATION"
 	Preallocation = "PREALLOCATION"
+	// ImportProxyHTTP provides a constant to capture our env variable "HTTP_PROXY"
+	ImportProxyHTTP = "HTTP_PROXY"
+	// ImportProxyHTTPS provides a constant to capture our env variable "HTTPS_PROXY"
+	ImportProxyHTTPS = "HTTPS_PROXY"
+	// ImportProxyNoProxy provides a constant to capture our env variable "NO_PROXY"
+	ImportProxyNoProxy = "NO_PROXY"
+	// ImporterProxyCertDirVar provides a constant to capture our env variable "IMPORTER_CERT_DIR"
+	ImporterProxyCertDirVar = "IMPORTER_PROXY_CERT_DIR"
 
 	// CloningLabelValue provides a constant to use as a label value for pod affinity (controller pkg only)
 	CloningLabelValue = "host-assisted-cloning"
@@ -182,27 +197,6 @@ const (
 	UploadFormAsync = "/v1beta1/upload-form-async"
 )
 
-// PreallocationStatus is used to mark result of preallocation in importer and uploader
-type PreallocationStatus string
-
-const (
-	// PreallocationApplied is used to signal that preallocation was performed on the storage
-	PreallocationApplied PreallocationStatus = "true"
-	// PreallocationNotApplied is ued to singal that preallocation was not performed
-	PreallocationNotApplied PreallocationStatus = "false"
-	// PreallocationSkipped is used to signal that preallocation was not performed even though it was requested
-	PreallocationSkipped PreallocationStatus = "skipped"
-)
-
-// PreallocationStatusFromBool converts boolean value to PreallocationStatus
-func PreallocationStatusFromBool(preallocation bool) PreallocationStatus {
-	if preallocation {
-		return PreallocationApplied
-	}
-
-	return PreallocationNotApplied
-}
-
 // ProxyPaths are all supported paths
 var ProxyPaths = append(
 	append(SyncUploadPaths, AsyncUploadPaths...),
@@ -231,4 +225,9 @@ var SyncUploadFormPaths = []string{
 var AsyncUploadFormPaths = []string{
 	UploadFormAsync,
 	"/v1alpha1/upload-form-async",
+}
+
+// ErrConnectionRefused checks whether the error is "connection refused"
+func ErrConnectionRefused(err error) bool {
+	return strings.Contains(err.Error(), "connection refused")
 }

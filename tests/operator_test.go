@@ -38,7 +38,7 @@ var _ = Describe("ALL Operator tests", func() {
 			f := framework.NewFramework("operator-test")
 
 			It("[test_id:3951]should create a route in OpenShift", func() {
-				if !tests.IsOpenshift(f.K8sClient) {
+				if !utils.IsOpenshift(f.K8sClient) {
 					Skip("This test is OpenShift specific")
 				}
 
@@ -74,7 +74,7 @@ var _ = Describe("ALL Operator tests", func() {
 			})
 
 			It("[test_id:3952]add cdi-sa to containerized-data-importer scc", func() {
-				if !tests.IsOpenshift(f.K8sClient) {
+				if !utils.IsOpenshift(f.K8sClient) {
 					Skip("This test is OpenShift specific")
 				}
 
@@ -763,8 +763,14 @@ var _ = Describe("ALL Operator tests", func() {
 						naa := s.Annotations["auth.openshift.io/certificate-not-after"]
 						t2, err := time.Parse(time.RFC3339, naa)
 						Expect(err).ToNot(HaveOccurred())
-						Expect(t2.Sub(t) >= time.Minute*20).To(BeTrue())
-						Expect((t2.Sub(t) - (time.Minute * 20)) <= time.Second).To(BeTrue())
+						if t2.Sub(t) < time.Minute*20 {
+							fmt.Fprintf(GinkgoWriter, "Not-Before (%s) should be 20 minutes before Not-After (%s)\n", nba, naa)
+							return false
+						}
+						if t2.Sub(t)-(time.Minute*20) > time.Second {
+							fmt.Fprintf(GinkgoWriter, "Not-Before (%s) should be 20 minutes before Not-After (%s) with 1 second toleration\n", nba, naa)
+							return false
+						}
 					}
 
 					for _, s := range serverSecrets {
@@ -774,8 +780,14 @@ var _ = Describe("ALL Operator tests", func() {
 						naa := s.Annotations["auth.openshift.io/certificate-not-after"]
 						t2, err := time.Parse(time.RFC3339, naa)
 						Expect(err).ToNot(HaveOccurred())
-						Expect(t2.Sub(t) >= time.Minute*5).To(BeTrue())
-						Expect((t2.Sub(t) - (time.Minute * 5)) <= time.Second).To(BeTrue())
+						if t2.Sub(t) < time.Minute*5 {
+							fmt.Fprintf(GinkgoWriter, "Not-Before (%s) should be 5 minutes before Not-After (%s)\n", nba, naa)
+							return false
+						}
+						if t2.Sub(t)-(time.Minute*5) > time.Second {
+							fmt.Fprintf(GinkgoWriter, "Not-Before (%s) should be 5 minutes before Not-After (%s) with 1 second toleration\n", nba, naa)
+							return false
+						}
 					}
 
 					return true

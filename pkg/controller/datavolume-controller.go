@@ -171,6 +171,16 @@ func pvcIsPopulated(pvc *corev1.PersistentVolumeClaim, dv *cdiv1.DataVolume) boo
 	return ok && dvName == dv.Name
 }
 
+// GetDataVolumeClaimName returns the PVC name associated with the DV
+func GetDataVolumeClaimName(dv *cdiv1.DataVolume) string {
+	pvcName, ok := dv.Annotations[AnnPrePopulated]
+	if ok {
+		return pvcName
+	}
+
+	return dv.Name
+}
+
 // NewDatavolumeController creates a new instance of the datavolume controller.
 func NewDatavolumeController(mgr manager.Manager, extClientSet extclientset.Interface, log logr.Logger) (controller.Controller, error) {
 	client := mgr.GetClient()
@@ -490,7 +500,7 @@ func (r *DatavolumeReconciler) isSourcePVCPopulated(dv *cdiv1.DataVolume) (bool,
 }
 
 func (r *DatavolumeReconciler) sourceInUse(dv *cdiv1.DataVolume) (bool, error) {
-	pods, err := getPodsUsingPVCs(r.client, dv.Spec.Source.PVC.Namespace, sets.NewString(dv.Spec.Source.PVC.Name), false)
+	pods, err := GetPodsUsingPVCs(r.client, dv.Spec.Source.PVC.Namespace, sets.NewString(dv.Spec.Source.PVC.Name), false)
 	if err != nil {
 		return false, err
 	}
@@ -573,6 +583,14 @@ func (r *DatavolumeReconciler) getSnapshotClassForSmartClone(dataVolume *cdiv1.D
 			r.log.V(3).Info("Source PVC is missing", "source namespace", dataVolume.Spec.Source.PVC.Namespace, "source name", dataVolume.Spec.Source.PVC.Name)
 		}
 		return "", errors.New("source PVC not found")
+	}
+
+	sourceVolumeMode := GetVolumeMode(pvc.Spec.VolumeMode)
+	targetVolumeMode := GetVolumeMode(dataVolume.Spec.PVC.VolumeMode)
+	if sourceVolumeMode != targetVolumeMode {
+		r.log.V(3).Info("Source PVC and target PVC have different volume modes, falling back to host assisted clone", "source volume mode",
+			sourceVolumeMode, "target volume mode", targetVolumeMode)
+		return "", errors.New("Source PVC and target PVC have different volume modes, falling back to host assisted clone")
 	}
 
 	targetPvcStorageClassName := dataVolume.Spec.PVC.StorageClassName
@@ -1056,7 +1074,7 @@ func updateProgressUsingPod(dataVolumeCopy *cdiv1.DataVolume, pod *corev1.Pod) e
 		url := fmt.Sprintf("https://%s:%d/metrics", pod.Status.PodIP, port)
 		resp, err := httpClient.Get(url)
 		if err != nil {
-			if errConnectionRefused(err) {
+			if common.ErrConnectionRefused(err) {
 				return nil
 			}
 			return err
@@ -1078,10 +1096,6 @@ func updateProgressUsingPod(dataVolumeCopy *cdiv1.DataVolume, pod *corev1.Pod) e
 		return nil
 	}
 	return err
-}
-
-func errConnectionRefused(err error) bool {
-	return strings.Contains(err.Error(), "connection refused")
 }
 
 func getPodMetricsPort(pod *corev1.Pod) (int, error) {
@@ -1159,6 +1173,9 @@ func (r *DatavolumeReconciler) newPersistentVolumeClaim(dataVolume *cdiv1.DataVo
 		annotations[AnnSource] = SourceS3
 		if dataVolume.Spec.Source.S3.SecretRef != "" {
 			annotations[AnnSecret] = dataVolume.Spec.Source.S3.SecretRef
+		}
+		if dataVolume.Spec.Source.S3.CertConfigMap != "" {
+			annotations[AnnCertConfigMap] = dataVolume.Spec.Source.S3.CertConfigMap
 		}
 	} else if dataVolume.Spec.Source.Registry != nil {
 		annotations[AnnSource] = SourceRegistry
