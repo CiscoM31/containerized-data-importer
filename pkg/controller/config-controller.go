@@ -122,9 +122,7 @@ func (r *CDIConfigReconciler) setOperatorParams(config *cdiv1.CDIConfig) error {
 		return nil
 	}
 
-	if cdiCR.Spec.Config == nil {
-		config.Spec = cdiv1.CDIConfigSpec{}
-	} else {
+	if cdiCR.Spec.Config != nil {
 		config.Spec = *cdiCR.Spec.Config
 	}
 
