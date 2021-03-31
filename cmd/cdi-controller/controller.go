@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"k8s.io/client-go/tools/record"
 	"os"
 	"strconv"
 
@@ -115,7 +116,12 @@ func start(cfg *rest.Config, stopCh <-chan struct{}) {
 		klog.Fatalf("Error building extClient: %s", err.Error())
 	}
 
-	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{})
+	mgr, err := manager.New(config.GetConfigOrDie(), manager.Options{
+		EventBroadcaster: record.NewBroadcasterWithCorrelatorOptions(record.CorrelatorOptions{
+			BurstSize: 500,
+			QPS:       100,
+		}),
+	})
 	if err != nil {
 		klog.Errorf("Unable to setup controller manager: %v", err)
 		os.Exit(1)
