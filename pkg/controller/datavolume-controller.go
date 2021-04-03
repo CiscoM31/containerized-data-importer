@@ -243,6 +243,11 @@ func (r *DatavolumeReconciler) Reconcile(req reconcile.Request) (reconcile.Resul
 			if err := r.client.Get(context.TODO(), req.NamespacedName, pvc); err != nil {
 					s := fmt.Sprintf("failed to find pvc for deleted datavolume %s", req.NamespacedName)
 					log.Info(s)
+
+					cdi := &cdiv1.CDI{}
+					r.client.Get(context.TODO(), types.NamespacedName{Name: "cdi", Namespace: "default"}, cdi)
+					msg := fmt.Sprintf("Deleted DataVolume %s", req.Name)
+					r.recorder.Event(cdi, corev1.EventTypeNormal, "Deletion", msg)
 			} else {
 				s := fmt.Sprintf("found pvc for deleted datavolume %s", req.NamespacedName)
 				log.Info(s)
