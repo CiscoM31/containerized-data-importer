@@ -268,7 +268,10 @@ func createHTTPClient(certDir string) (*http.Client, error) {
 }
 
 func createHTTPReader(ctx context.Context, ep *url.URL, accessKey, secKey, certDir string) (io.ReadCloser, uint64, bool, error) {
-	var brokenForQemuImg bool
+	// HACK alert - by setting this we force download to use scratch
+	// nbd's range requests to onprem IS are not working properly.
+	brokenForQemuImg := true
+
 	client, err := createHTTPClient(certDir)
 	if err != nil {
 		return nil, uint64(0), false, errors.Wrap(err, "Error creating http client")

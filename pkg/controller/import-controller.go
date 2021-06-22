@@ -650,6 +650,8 @@ func (r *ImportReconciler) requiresScratchSpace(pvc *corev1.PersistentVolumeClai
 			scratchRequired = true
 		case SourceRegistry:
 			scratchRequired = true
+		case SourceHTTP:
+			scratchRequired = true
 		}
 	}
 	value, ok := pvc.Annotations[AnnRequiresScratch]

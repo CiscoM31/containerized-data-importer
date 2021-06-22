@@ -1280,7 +1280,10 @@ func (r *DatavolumeReconciler) newPersistentVolumeClaim(dataVolume *cdiv1.DataVo
 	}
 
 	// If PVC Source is set. Set the DataSource
-	if dataVolume.Spec.Source.PVC != nil {
+	// HACK: Use CSI native cloning only if block mode is enabled. For CSIs that do not support block mode, do not support
+	// CSI native cloning as well. Atleast for now CDI does not have a easy switch to figure out when to use and not to use
+	// Native CSI cloning.
+	if dataVolume.Spec.Source.PVC != nil && dataVolume.Spec.PVC.VolumeMode != nil && *dataVolume.Spec.PVC.VolumeMode == corev1.PersistentVolumeBlock {
 		apigroup := ""
 		pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{}
 		pvc.Spec.DataSource.Kind = "PersistentVolumeClaim"
